@@ -32,14 +32,15 @@ from __future__ import annotations
 
 from flask import Blueprint, request
 
+from schemas.common import validate_session_id
+
 from schemas.recording import (
+    validate_failed_recording_request,
     validate_recording_id_request,
     validate_start_recording_request,
     validate_stop_recording_request,
     validate_upload_recording_request,
 )
-
-from schemas.common import validate_session_id
 
 from services.recording_service import (
     get_recording,
@@ -178,8 +179,6 @@ def start_reaction_route():
     try:
         payload = _get_json_or_empty()
 
-        # The generic recording schema is reused, but the route
-        # itself forces the recording type to "reaction".
         session_id = payload.get(
             "session_id"
         )
@@ -680,34 +679,9 @@ def reaction_failed_route():
     try:
         payload = _get_json_or_empty()
 
-        validated = validate_recording_id_request(
+        validated = validate_failed_recording_request(
             payload
         )
-
-        reason = payload.get(
-            "reason",
-            "Reaction recording operation failed.",
-        )
-
-        if not isinstance(
-            reason,
-            str,
-        ):
-            return bad_request(
-                message="reason must be a string."
-            )
-
-        reason = reason.strip()
-
-        if not reason:
-            reason = (
-                "Reaction recording operation failed."
-            )
-
-        if len(reason) > 512:
-            return bad_request(
-                message="reason is too long."
-            )
 
         session = _get_active_session(
             validated["session_id"]
@@ -743,7 +717,7 @@ def reaction_failed_route():
             recording_id=validated[
                 "recording_id"
             ],
-            reason=reason,
+            reason=validated["reason"],
         )
 
         return success_response(
@@ -758,4 +732,4 @@ def reaction_failed_route():
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
-      )
+                  )
