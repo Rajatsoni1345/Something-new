@@ -1,0 +1,234 @@
+"""
+Birthday Quest - Flask Application
+
+Application factory and global Flask configuration.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+from flask import Flask, jsonify
+
+from config import get_config
+from extensions import init_extensions
+
+
+# ------------------------------------------------------------
+# LOGGING
+# ------------------------------------------------------------
+
+def configure_logging(app: Flask) -> None:
+    """Configure application-wide logging."""
+
+    log_level_name = app.config.get(
+        "LOG_LEVEL",
+        "INFO",
+    ).upper()
+
+    log_level = getattr(
+        logging,
+        log_level_name,
+        logging.INFO,
+    )
+
+    logging.basicConfig(
+        level=log_level,
+        format=(
+            "%(asctime)s | "
+            "%(levelname)s | "
+            "%(name)s | "
+            "%(message)s"
+        ),
+    )
+
+    app.logger.setLevel(log_level)
+
+
+# ------------------------------------------------------------
+# SECURITY HEADERS
+# ------------------------------------------------------------
+
+def register_security_headers(app: Flask) -> None:
+    """Attach baseline security headers to responses."""
+
+    @app.after_request
+    def add_security_headers(response):
+        response.headers.setdefault(
+            "X-Content-Type-Options",
+            "nosniff",
+        )
+
+        response.headers.setdefault(
+            "X-Frame-Options",
+            "DENY",
+        )
+
+        response.headers.setdefault(
+            "Referrer-Policy",
+            "strict-origin-when-cross-origin",
+        )
+
+        response.headers.setdefault(
+            "Permissions-Policy",
+            "camera=(self), microphone=(self)",
+        )
+
+        if not app.debug:
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; "
+                "includeSubDomains",
+            )
+
+        return response
+
+
+# ------------------------------------------------------------
+# ERROR HANDLERS
+# ------------------------------------------------------------
+
+def register_error_handlers(app: Flask) -> None:
+    """Register centralized HTTP error responses."""
+
+    @app.errorhandler(404)
+    def handle_not_found(error):
+        return jsonify(
+            {
+                "success": False,
+                "error": {
+                    "code": "NOT_FOUND",
+                    "message": "The requested resource was not found.",
+                },
+            }
+        ), 404
+
+    @app.errorhandler(405)
+    def handle_method_not_allowed(error):
+        return jsonify(
+            {
+                "success": False,
+                "error": {
+                    "code": "METHOD_NOT_ALLOWED",
+                    "message": "The requested HTTP method is not allowed.",
+                },
+            }
+        ), 405
+
+    @app.errorhandler(413)
+    def handle_request_too_large(error):
+        return jsonify(
+            {
+                "success": False,
+                "error": {
+                    "code": "REQUEST_TOO_LARGE",
+                    "message": "The request is too large.",
+                },
+            }
+        ), 413
+
+    @app.errorhandler(500)
+    def handle_internal_error(error):
+        app.logger.exception(
+            "Unhandled internal server error."
+        )
+
+        return jsonify(
+            {
+                "success": False,
+                "error": {
+                    "code": "INTERNAL_SERVER_ERROR",
+                    "message": "An internal server error occurred.",
+                },
+            }
+        ), 500
+
+
+# ------------------------------------------------------------
+# APPLICATION FACTORY
+# ------------------------------------------------------------
+
+def create_app() -> Flask:
+    """
+    Create and configure the Birthday Quest Flask application.
+    """
+
+    config_class = get_config()
+
+    app = Flask(__name__)
+
+    # --------------------------------------------------------
+    # LOAD CONFIGURATION
+    # --------------------------------------------------------
+
+    app.config.from_object(config_class)
+
+    # --------------------------------------------------------
+    # BASIC FLASK SETTINGS
+    # --------------------------------------------------------
+
+    app.config["MAX_CONTENT_LENGTH"] = config_class.MAX_CONTENT_LENGTH
+
+    # --------------------------------------------------------
+    # LOGGING
+    # --------------------------------------------------------
+
+    configure_logging(app)
+
+    # --------------------------------------------------------
+    # EXTENSIONS
+    # --------------------------------------------------------
+
+    init_extensions(app)
+
+    # --------------------------------------------------------
+    # SECURITY
+    # --------------------------------------------------------
+
+    register_security_headers(app)
+
+    # --------------------------------------------------------
+    # ERROR HANDLERS
+    # --------------------------------------------------------
+
+    register_error_handlers(app)
+
+    # --------------------------------------------------------
+    # APPLICATION STARTUP LOG
+    # --------------------------------------------------------
+
+    app.logger.info(
+        "Birthday Quest backend initialized "
+        "(environment=%s)",
+        config_class.FLASK_ENV,
+    )
+
+    return app
+
+
+# ------------------------------------------------------------
+# DEVELOPMENT ENTRY POINT
+# ------------------------------------------------------------
+
+app = create_app()
+
+
+if __name__ == "__main__":
+    host = os.getenv(
+        "FLASK_HOST",
+        "127.0.0.1",
+    )
+
+    port = int(
+        os.getenv(
+            "FLASK_PORT",
+            "5000",
+        )
+    )
+
+    app.run(
+        host=host,
+        port=port,
+        debug=app.config.get("DEBUG", False),
+  )
