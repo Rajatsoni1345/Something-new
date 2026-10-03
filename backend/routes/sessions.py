@@ -1,16 +1,22 @@
 """
 Birthday Quest - Session Routes
 
-HTTP API endpoints for creating and recovering Birthday Quest
-sessions.
+HTTP API endpoints for creating, recovering, and reading
+Birthday Quest sessions.
 
-Routes are intentionally thin:
-HTTP input -> schema validation -> service -> response
+Routes remain intentionally thin:
+
+HTTP request
+    -> schema validation
+    -> service
+    -> consistent API response
 """
 
 from __future__ import annotations
 
 from flask import Blueprint, request
+
+from schemas.common import validate_session_id
 
 from schemas.session import (
     validate_create_session_request,
@@ -29,6 +35,10 @@ from utils.responses import (
     success_response,
 )
 
+
+# ============================================================
+# BLUEPRINT
+# ============================================================
 
 sessions_bp = Blueprint(
     "sessions",
@@ -68,7 +78,7 @@ def create_session_route():
             status_code=201,
         )
 
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
         )
@@ -101,7 +111,10 @@ def recover_session_route():
 
         if session is None:
             return not_found(
-                message="The requested session could not be recovered."
+                message=(
+                    "The requested session could not "
+                    "be recovered."
+                )
             )
 
         return success_response(
@@ -111,7 +124,7 @@ def recover_session_route():
             status_code=200,
         )
 
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
         )
@@ -132,8 +145,12 @@ def get_session_route(
     """
 
     try:
-        session = get_session(
+        validated_session_id = validate_session_id(
             session_id
+        )
+
+        session = get_session(
+            validated_session_id
         )
 
         if session is None:
@@ -148,7 +165,7 @@ def get_session_route(
             status_code=200,
         )
 
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
-      )
+    )
