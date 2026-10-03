@@ -3,34 +3,24 @@ Birthday Quest - Recording Routes
 
 HTTP API endpoints for the recording lifecycle.
 
-Routes remain intentionally thin:
+The browser owns:
+- camera permission
+- microphone permission
+- MediaRecorder
+- Blob creation
 
-HTTP request
-    -> request/schema validation
-    -> session lookup
-    -> recording service
-    -> consistent API response
-
-IMPORTANT:
-- Camera and microphone access remain in the browser.
-- Actual video files are handled by the recording service.
-- Cloudinary credentials are never exposed here.
-- Recording ownership is checked through the session.
-- Only verified recordings expose their permanent secure URL.
+The backend owns:
+- session validation
+- recording authorization
+- recording lifecycle
+- Cloudinary upload
+- verification
+- quest-state transitions
 """
 
 from __future__ import annotations
 
 from flask import Blueprint, request
-
-from schemas.recording import (
-    validate_recording_id_request,
-    validate_start_recording_request,
-    validate_stop_recording_request,
-    validate_upload_recording_request,
-)
-
-from schemas.common import validate_session_id
 
 from services.recording_service import (
     get_recording,
@@ -42,110 +32,157 @@ from services.recording_service import (
     verify_recording,
 )
 
-from services.session_service import get_session
+from services.session_service import (
+    get_session,
+)
 
 from utils.responses import (
-    bad_request,
-    not_found,
+    error_response,
     success_response,
 )
 
 
-# ============================================================
-# BLUEPRINT
-# ============================================================
-
 recordings_bp = Blueprint(
     "recordings",
     __name__,
+    url_prefix="/api/recordings",
 )
 
 
 # ============================================================
-# INTERNAL HELPERS
+# REQUEST HELPERS
 # ============================================================
 
-def _get_active_session(
-    session_id: str,
+def _get_json_body() -> dict:
+    """
+    Safely return a JSON request body.
+    """
+
+    if not request.is_json:
+        raise ValueError(
+            "Request body must be JSON."
+        )
+
+    data = request.get_json(
+        silent=True
+    )
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            "Request body must be a JSON object."
+        )
+
+    return data
+
+
+def _require_session_id(data: dict) -> str:
+    """
+    Extract the session ID from a request.
+    """
+
+    session_id = data.get(
+        "session_id"
+    )
+
+    if not isinstance(
+        session_id,
+        str,
+    ):
+        raise ValueError(
+            "session_id is required."
+        )
+
+    session_id = session_id.strip()
+
+    if not session_id:
+        raise ValueError(
+            "session_id is required."
+        )
+
+    return session_id
+
+
+def _get_session_from_request(
+    data: dict,
 ):
     """
-    Validate the session ID and retrieve the active session.
-
-    Routes use this helper so every recording endpoint applies
-    the same session checks.
+    Load and validate the session referenced by the request.
     """
 
-    validated_session_id = validate_session_id(
-        session_id
+    session_id = _require_session_id(
+        data
     )
 
     session = get_session(
-        validated_session_id
+        session_id
     )
 
     if session is None:
-        return None
+        raise ValueError(
+            "Session not found."
+        )
 
     if not session.active:
         raise ValueError(
-            "The session is inactive."
+            "Session is inactive."
         )
 
     return session
 
 
-def _recording_response_data(
-    recording,
-) -> dict:
-    """
-    Build the frontend-safe representation of a recording.
-
-    Sensitive/internal fields are intentionally not exposed.
-
-    The permanent Cloudinary URL is returned only after the
-    recording has been verified.
-    """
-
-    data = {
-        "recording_id": recording.recording_id,
-        "session_id": recording.session_id,
-        "recording_type": recording.recording_type,
-        "status": recording.status,
-        "created_at": recording.created_at,
-        "updated_at": recording.updated_at,
-        "duration_ms": recording.duration_ms,
-        "file_size_bytes": recording.file_size_bytes,
-        "content_type": recording.content_type,
-        "completed_at": recording.completed_at,
-        "attempt": recording.attempt,
-        "version": recording.version,
-    }
-
-    if (
-        recording.status == "verified"
-        and recording.secure_url
-    ):
-        data["secure_url"] = recording.secure_url
-
-    return data
-
-
-def _get_json_or_empty() -> dict:
-    """
-    Read a JSON body safely.
-
-    Recording upload itself uses multipart/form-data, so this
-    helper is used only by JSON endpoints.
-    """
-
-    payload = request.get_json(
-        silent=True
+def _require_recording_id(
+    data: dict,
+) -> str:
+    recording_id = data.get(
+        "recording_id"
     )
 
-    if payload is None:
-        return {}
+    if not isinstance(
+        recording_id,
+        str,
+    ):
+        raise ValueError(
+            "recording_id is required."
+        )
 
-    return payload
+    recording_id = recording_id.strip()
+
+    if not recording_id:
+        raise ValueError(
+            "recording_id is required."
+        )
+
+    return recording_id
+
+
+def _parse_optional_int(
+    value,
+    field_name: str,
+):
+    """
+    Parse an optional integer without accepting booleans.
+    """
+
+    if value is None:
+        return None
+
+    if isinstance(
+        value,
+        bool,
+    ):
+        raise ValueError(
+            f"{field_name} must be an integer."
+        )
+
+    if not isinstance(
+        value,
+        int,
+    ):
+        raise ValueError(
+            f"{field_name} must be an integer."
+        )
+
+    return value
 
 
 # ============================================================
@@ -155,59 +192,51 @@ def _get_json_or_empty() -> dict:
 @recordings_bp.post("/start")
 def start_recording_route():
     """
-    Start a new server-authorized recording.
+    Start an authorized recording.
 
-    Request JSON:
-
-        {
-            "session_id": "...",
-            "recording_type": "video_1"
-        }
-
-    The browser should begin MediaRecorder only after receiving
-    a successful response.
+    JSON:
+    {
+        "session_id": "...",
+        "recording_type": "video_1"
+    }
     """
 
     try:
-        payload = _get_json_or_empty()
+        data = _get_json_body()
 
-        validated = validate_start_recording_request(
-            payload
+        session = _get_session_from_request(
+            data
         )
 
-        session = _get_active_session(
-            validated["session_id"]
+        recording_type = data.get(
+            "recording_type"
         )
-
-        if session is None:
-            return not_found(
-                message="Session not found."
-            )
 
         recording = start_recording(
             session=session,
-            recording_type=validated[
-                "recording_type"
-            ],
+            recording_type=recording_type,
         )
 
         return success_response(
-            data={
-                "recording": _recording_response_data(
-                    recording
-                )
-            },
+            data=recording.to_dict(),
             status_code=201,
         )
 
-    except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
+    except ValueError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=400,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to start recording.",
+            status_code=500,
         )
 
 
 # ============================================================
-# STOP RECORDING
+# MARK STOPPING
 # ============================================================
 
 @recordings_bp.post("/stop")
@@ -215,133 +244,170 @@ def stop_recording_route():
     """
     Mark an active recording as stopping.
 
-    The browser should call this when MediaRecorder.stop()
-    is about to happen.
+    JSON:
+    {
+        "session_id": "...",
+        "recording_id": "..."
+    }
     """
 
     try:
-        payload = _get_json_or_empty()
+        data = _get_json_body()
 
-        validated = validate_stop_recording_request(
-            payload
+        session = _get_session_from_request(
+            data
         )
 
-        session = _get_active_session(
-            validated["session_id"]
+        recording_id = _require_recording_id(
+            data
         )
-
-        if session is None:
-            return not_found(
-                message="Session not found."
-            )
 
         recording = mark_recording_stopping(
             session=session,
-            recording_id=validated[
-                "recording_id"
-            ],
+            recording_id=recording_id,
         )
 
         return success_response(
-            data={
-                "recording": _recording_response_data(
-                    recording
-                )
-            },
-            status_code=200,
+            data=recording.to_dict()
         )
 
-    except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
+    except ValueError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=400,
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to stop recording.",
+            status_code=500,
         )
 
 
 # ============================================================
-# UPLOAD PENDING
+# MARK UPLOAD PENDING
 # ============================================================
 
 @recordings_bp.post("/upload-pending")
-def mark_upload_pending_route():
+def upload_pending_route():
     """
-    Mark a stopped recording as ready for Cloudinary upload.
+    Mark a browser-generated recording Blob as ready for
+    Cloudinary upload.
 
-    This endpoint receives JSON metadata only.
-
-    The actual video Blob is uploaded through /upload.
+    JSON:
+    {
+        "session_id": "...",
+        "recording_id": "...",
+        "duration_ms": 12345,
+        "file_size_bytes": 123456,
+        "content_type": "video/webm"
+    }
     """
 
     try:
-        payload = _get_json_or_empty()
+        data = _get_json_body()
 
-        validated = validate_upload_recording_request(
-            payload
+        session = _get_session_from_request(
+            data
         )
 
-        session = _get_active_session(
-            validated["session_id"]
+        recording_id = _require_recording_id(
+            data
         )
 
-        if session is None:
-            return not_found(
-                message="Session not found."
+        duration_ms = _parse_optional_int(
+            data.get("duration_ms"),
+            "duration_ms",
+        )
+
+        file_size_bytes = _parse_optional_int(
+            data.get("file_size_bytes"),
+            "file_size_bytes",
+        )
+
+        content_type = data.get(
+            "content_type"
+        )
+
+        if content_type is not None and not isinstance(
+            content_type,
+            str,
+        ):
+            raise ValueError(
+                "content_type must be a string."
             )
 
         recording = mark_recording_upload_pending(
             session=session,
-            recording_id=validated[
-                "recording_id"
-            ],
-            duration_ms=validated.get(
-                "duration_ms"
-            ),
-            file_size_bytes=validated.get(
-                "file_size_bytes"
-            ),
-            content_type=validated.get(
-                "content_type"
-            ),
+            recording_id=recording_id,
+            duration_ms=duration_ms,
+            file_size_bytes=file_size_bytes,
+            content_type=content_type,
         )
 
         return success_response(
-            data={
-                "recording": _recording_response_data(
-                    recording
-                )
-            },
-            status_code=200,
+            data=recording.to_dict()
         )
 
-    except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
+    except ValueError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=400,
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to prepare recording upload.",
+            status_code=500,
         )
 
 
 # ============================================================
-# ACTUAL VIDEO UPLOAD
+# UPLOAD
 # ============================================================
 
 @recordings_bp.post("/upload")
 def upload_recording_route():
     """
-    Upload the browser-generated video Blob to Cloudinary.
+    Upload a recording Blob to Cloudinary.
 
     Expected multipart/form-data:
 
         session_id
         recording_id
-        duration_ms        optional
-        file_size_bytes    optional
-        content_type       optional
-        file                required
+        duration_ms          optional
+        file_size_bytes      optional
+        content_type         optional
+        file                  required
 
-    The field name for the actual video is:
-
-        file
+    The file itself is never written to Render's filesystem.
     """
 
     try:
+        if request.content_type is None:
+            raise ValueError(
+                "Content-Type is required."
+            )
+
+        if not request.content_type.startswith(
+            "multipart/form-data"
+        ):
+            raise ValueError(
+                "Upload request must use multipart/form-data."
+            )
+
         session_id = request.form.get(
             "session_id"
         )
@@ -350,39 +416,44 @@ def upload_recording_route():
             "recording_id"
         )
 
-        if not session_id:
-            return bad_request(
-                message="session_id is required."
+        if not isinstance(
+            session_id,
+            str,
+        ) or not session_id.strip():
+            raise ValueError(
+                "session_id is required."
             )
 
-        if not recording_id:
-            return bad_request(
-                message="recording_id is required."
+        if not isinstance(
+            recording_id,
+            str,
+        ) or not recording_id.strip():
+            raise ValueError(
+                "recording_id is required."
             )
 
-        session = _get_active_session(
-            session_id
+        session = get_session(
+            session_id.strip()
         )
 
         if session is None:
-            return not_found(
-                message="Session not found."
+            raise ValueError(
+                "Session not found."
             )
 
-        # ----------------------------------------------------
-        # Validate recording ID.
-        # ----------------------------------------------------
+        if not session.active:
+            raise ValueError(
+                "Session is inactive."
+            )
 
-        validated_id = validate_recording_id_request(
-            {
-                "session_id": session_id,
-                "recording_id": recording_id,
-            }
+        file_object = request.files.get(
+            "file"
         )
 
-        # ----------------------------------------------------
-        # Validate optional metadata.
-        # ----------------------------------------------------
+        if file_object is None:
+            raise ValueError(
+                "Recording file is required."
+            )
 
         duration_raw = request.form.get(
             "duration_ms"
@@ -407,10 +478,8 @@ def upload_recording_route():
                     duration_raw
                 )
             except (TypeError, ValueError):
-                return bad_request(
-                    message=(
-                        "duration_ms must be a valid integer."
-                    )
+                raise ValueError(
+                    "duration_ms must be an integer."
                 )
 
         file_size_bytes = None
@@ -424,189 +493,126 @@ def upload_recording_route():
                     file_size_raw
                 )
             except (TypeError, ValueError):
-                return bad_request(
-                    message=(
-                        "file_size_bytes must be a valid integer."
-                    )
+                raise ValueError(
+                    "file_size_bytes must be an integer."
                 )
-
-        # ----------------------------------------------------
-        # Actual video file.
-        # ----------------------------------------------------
-
-        video_file = request.files.get(
-            "file"
-        )
-
-        if video_file is None:
-            return bad_request(
-                message=(
-                    "The recording file is required."
-                )
-            )
-
-        if not video_file.filename:
-            return bad_request(
-                message=(
-                    "The recording file has no filename."
-                )
-            )
 
         recording = upload_recording(
             session=session,
-            recording_id=validated_id[
-                "recording_id"
-            ],
-            file_object=video_file,
+            recording_id=recording_id.strip(),
+            file_object=file_object,
             duration_ms=duration_ms,
             file_size_bytes=file_size_bytes,
             content_type=content_type,
         )
 
         return success_response(
-            data={
-                "recording": _recording_response_data(
-                    recording
-                )
-            },
-            status_code=200,
+            data=recording.to_dict()
         )
 
-    except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
+    except ValueError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=400,
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to upload recording.",
+            status_code=500,
         )
 
 
 # ============================================================
-# VERIFY RECORDING
+# VERIFY
 # ============================================================
 
 @recordings_bp.post("/verify")
 def verify_recording_route():
     """
-    Verify that the recording exists as a video in Cloudinary.
+    Verify that a recording exists in Cloudinary as a video.
 
-    This endpoint should be called after upload succeeds.
+    JSON:
+    {
+        "session_id": "...",
+        "recording_id": "..."
+    }
     """
 
     try:
-        payload = _get_json_or_empty()
+        data = _get_json_body()
 
-        validated = validate_recording_id_request(
-            payload
+        session = _get_session_from_request(
+            data
         )
 
-        session = _get_active_session(
-            validated["session_id"]
+        recording_id = _require_recording_id(
+            data
         )
-
-        if session is None:
-            return not_found(
-                message="Session not found."
-            )
 
         recording = verify_recording(
             session=session,
-            recording_id=validated[
-                "recording_id"
-            ],
+            recording_id=recording_id,
         )
 
         return success_response(
-            data={
-                "recording": _recording_response_data(
-                    recording
-                )
-            },
-            status_code=200,
+            data=recording.to_dict()
         )
 
-    except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
+    except ValueError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=400,
         )
 
-
-# ============================================================
-# GET RECORDING STATUS
-# ============================================================
-
-@recordings_bp.post("/status")
-def get_recording_status_route():
-    """
-    Return the current status of a recording.
-
-    POST is used instead of a public GET path so the session ID
-    remains inside the request body rather than being placed in
-    a URL.
-    """
-
-    try:
-        payload = _get_json_or_empty()
-
-        validated = validate_recording_id_request(
-            payload
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
         )
 
-        session = _get_active_session(
-            validated["session_id"]
-        )
-
-        if session is None:
-            return not_found(
-                message="Session not found."
-            )
-
-        recording = get_recording(
-            session=session,
-            recording_id=validated[
-                "recording_id"
-            ],
-        )
-
-        if recording is None:
-            return not_found(
-                message="Recording not found."
-            )
-
-        return success_response(
-            data={
-                "recording": _recording_response_data(
-                    recording
-                )
-            },
-            status_code=200,
-        )
-
-    except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
+    except Exception:
+        return error_response(
+            message="Unable to verify recording.",
+            status_code=500,
         )
 
 
 # ============================================================
-# MARK FAILED
+# FAILURE
 # ============================================================
 
-@recordings_bp.post("/failed")
-def mark_recording_failed_route():
+@recordings_bp.post("/fail")
+def fail_recording_route():
     """
     Mark a recording as failed.
 
-    This is intended for controlled recovery/error handling.
-    The frontend cannot arbitrarily change a verified recording
-    back to failed.
+    JSON:
+    {
+        "session_id": "...",
+        "recording_id": "...",
+        "reason": "..."
+    }
     """
 
     try:
-        payload = _get_json_or_empty()
+        data = _get_json_body()
 
-        validated = validate_recording_id_request(
-            payload
+        session = _get_session_from_request(
+            data
         )
 
-        reason = payload.get(
+        recording_id = _require_recording_id(
+            data
+        )
+
+        reason = data.get(
             "reason",
             "Recording operation failed.",
         )
@@ -615,42 +621,97 @@ def mark_recording_failed_route():
             reason,
             str,
         ):
-            return bad_request(
-                message="reason must be a string."
-            )
-
-        if len(reason.strip()) > 512:
-            return bad_request(
-                message="reason is too long."
-            )
-
-        session = _get_active_session(
-            validated["session_id"]
-        )
-
-        if session is None:
-            return not_found(
-                message="Session not found."
+            raise ValueError(
+                "reason must be a string."
             )
 
         recording = mark_recording_failed(
             session=session,
-            recording_id=validated[
-                "recording_id"
-            ],
+            recording_id=recording_id,
             reason=reason,
         )
 
         return success_response(
-            data={
-                "recording": _recording_response_data(
-                    recording
-                )
-            },
-            status_code=200,
+            data=recording.to_dict()
         )
 
-    except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
-)
+    except ValueError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=400,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to update recording status.",
+            status_code=500,
+        )
+
+
+# ============================================================
+# GET RECORDING
+# ============================================================
+
+@recordings_bp.get("/<recording_id>")
+def get_recording_route(
+    recording_id: str,
+):
+    """
+    Retrieve recording metadata for the owning session.
+
+    session_id is intentionally required as a query parameter.
+    """
+
+    try:
+        session_id = request.args.get(
+            "session_id"
+        )
+
+        if not isinstance(
+            session_id,
+            str,
+        ) or not session_id.strip():
+            raise ValueError(
+                "session_id is required."
+            )
+
+        session = get_session(
+            session_id.strip()
+        )
+
+        if session is None:
+            raise ValueError(
+                "Session not found."
+            )
+
+        if not session.active:
+            raise ValueError(
+                "Session is inactive."
+            )
+
+        recording = get_recording(
+            session=session,
+            recording_id=recording_id,
+        )
+
+        if recording is None:
+            return error_response(
+                message="Recording not found.",
+                status_code=404,
+            )
+
+        return success_response(
+            data=recording.to_dict()
+        )
+
+    except ValueError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=400,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to retrieve recording.",
+            status_code=500,
+    )
