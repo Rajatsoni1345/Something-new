@@ -1,322 +1,258 @@
-"""
-Birthday Quest - Validation Service
-
-Centralized validation rules shared by service and route layers.
-
-This module contains validation that is broader than simple request
-shape validation but does not perform database or external-service
-operations.
-"""
-
 from __future__ import annotations
 
-from typing import Any
-
-from schemas.common import (
-    MAX_STRING_LENGTH,
-    require_string,
-    validate_enum,
-    validate_recording_id,
-    validate_session_id,
-)
-
-from schemas.recording import (
-    MAX_RECORDING_DURATION_MS,
-    MAX_RECORDING_SIZE_BYTES,
-    RECORDING_CONTENT_TYPES,
-    RECORDING_TYPES,
-)
+from typing import Any, Mapping, Optional
 
 
-# ============================================================
-# QUEST CONSTANTS
-# ============================================================
-
-MIN_NORMAL_LEVEL = 1
-MAX_NORMAL_LEVEL = 4
+class ValidationError(ValueError):
+    """Raised when incoming data fails application validation."""
 
 
-# ============================================================
-# SESSION / RECORDING IDENTIFIERS
-# ============================================================
+MIN_LEVEL = 1
+MAX_LEVEL = 4
 
-def validate_session_identifier(
-    session_id: Any,
-) -> str:
-    """
-    Validate and normalize a session identifier.
-    """
+ALLOWED_RECORDING_TYPES = {
+    "video_1",
+    "video_2",
+    "reaction",
+    "final",
+}
 
-    return validate_session_id(
-        session_id
-    )
+ALLOWED_COLLECTIBLE_ITEMS = {
+    "owl",
+    "wand",
+    "broom",
+}
 
-
-def validate_recording_identifier(
-    recording_id: Any,
-) -> str:
-    """
-    Validate and normalize a recording identifier.
-    """
-
-    return validate_recording_id(
-        recording_id
-    )
+MAX_TEXT_LENGTH = 500
+MAX_WORD_LENGTH = 100
+MAX_CODE_LENGTH = 100
 
 
-# ============================================================
-# RECORDING VALIDATION
-# ============================================================
+def _require_mapping(data: Any, field_name: str = "data") -> Mapping[str, Any]:
+    if not isinstance(data, Mapping):
+        raise ValidationError(f"{field_name} must be an object.")
 
-def validate_recording_type(
-    recording_type: Any,
-) -> str:
-    """
-    Validate a supported recording type.
-    """
-
-    return validate_enum(
-        recording_type,
-        "recording_type",
-        RECORDING_TYPES,
-    )
+    return data
 
 
-def validate_recording_content_type(
-    content_type: Any,
-) -> str:
-    """
-    Validate a supported recording MIME type.
-    """
-
-    normalized = require_string(
-        content_type,
-        "content_type",
-        max_length=128,
-    ).lower()
-
-    if normalized not in RECORDING_CONTENT_TYPES:
-        raise ValueError(
-            "Unsupported recording content type."
-        )
-
-    return normalized
-
-
-def validate_recording_size(
-    file_size_bytes: Any,
-) -> int:
-    """
-    Validate the declared recording size.
-    """
-
-    if isinstance(
-        file_size_bytes,
-        bool,
-    ):
-        raise ValueError(
-            "file_size_bytes must be an integer."
-        )
-
-    if not isinstance(
-        file_size_bytes,
-        int,
-    ):
-        raise ValueError(
-            "file_size_bytes must be an integer."
-        )
-
-    if file_size_bytes <= 0:
-        raise ValueError(
-            "file_size_bytes must be greater than zero."
-        )
-
-    if file_size_bytes > MAX_RECORDING_SIZE_BYTES:
-        raise ValueError(
-            "The recording exceeds the maximum allowed size."
-        )
-
-    return file_size_bytes
-
-
-def validate_recording_duration(
-    duration_ms: Any,
-) -> int:
-    """
-    Validate the declared recording duration.
-    """
-
-    if isinstance(
-        duration_ms,
-        bool,
-    ):
-        raise ValueError(
-            "duration_ms must be an integer."
-        )
-
-    if not isinstance(
-        duration_ms,
-        int,
-    ):
-        raise ValueError(
-            "duration_ms must be an integer."
-        )
-
-    if duration_ms < 0:
-        raise ValueError(
-            "duration_ms cannot be negative."
-        )
-
-    if duration_ms > MAX_RECORDING_DURATION_MS:
-        raise ValueError(
-            "The recording exceeds the maximum allowed duration."
-        )
-
-    return duration_ms
-
-
-# ============================================================
-# PUBLIC IDENTIFIERS
-# ============================================================
-
-def validate_public_identifier(
+def _require_non_empty_string(
     value: Any,
     field_name: str,
+    *,
+    max_length: int = MAX_TEXT_LENGTH,
 ) -> str:
-    """
-    Validate an external/public identifier.
+    if not isinstance(value, str):
+        raise ValidationError(f"{field_name} must be a string.")
 
-    Used for identifiers that must never contain path
-    separators.
-    """
+    normalized = value.strip()
 
-    normalized = require_string(
-        value,
-        field_name,
-        min_length=1,
-        max_length=128,
-    )
+    if not normalized:
+        raise ValidationError(f"{field_name} is required.")
 
-    if "/" in normalized:
-        raise ValueError(
-            f"{field_name} cannot contain '/'."
-        )
-
-    if "\\" in normalized:
-        raise ValueError(
-            f"{field_name} cannot contain '\\'."
+    if len(normalized) > max_length:
+        raise ValidationError(
+            f"{field_name} must not exceed {max_length} characters."
         )
 
     return normalized
 
 
-# ============================================================
-# QUEST LEVEL VALIDATION
-# ============================================================
+def validate_session_id(session_id: Any) -> str:
+    return _require_non_empty_string(
+        session_id,
+        "session_id",
+        max_length=128,
+    )
 
-def validate_level(
-    level: Any,
-) -> int:
-    """
-    Validate a normal Birthday Quest level.
 
-    Normal quest levels are strictly 1 through 4.
+def validate_level(level: Any) -> int:
+    if isinstance(level, bool) or not isinstance(level, int):
+        raise ValidationError("level must be an integer.")
 
-    Level 5 is reserved for the final reveal and is represented
-    by the quest state machine rather than a normal level input.
-    """
-
-    if isinstance(
-        level,
-        bool,
-    ) or not isinstance(
-        level,
-        int,
-    ):
-        raise ValueError(
-            "level must be an integer."
-        )
-
-    if not (
-        MIN_NORMAL_LEVEL
-        <= level
-        <= MAX_NORMAL_LEVEL
-    ):
-        raise ValueError(
-            "level must be between "
-            f"{MIN_NORMAL_LEVEL} and "
-            f"{MAX_NORMAL_LEVEL}."
+    if level < MIN_LEVEL or level > MAX_LEVEL:
+        raise ValidationError(
+            f"level must be between {MIN_LEVEL} and {MAX_LEVEL}."
         )
 
     return level
 
 
-# ============================================================
-# ANSWER VALIDATION
-# ============================================================
+def validate_recording_type(recording_type: Any) -> str:
+    normalized = _require_non_empty_string(
+        recording_type,
+        "recording_type",
+        max_length=32,
+    ).casefold()
 
-def validate_answer(
-    answer: Any,
-) -> str:
-    """
-    Validate a quest answer.
-    """
-
-    return require_string(
-        answer,
-        "answer",
-        min_length=1,
-        max_length=MAX_STRING_LENGTH,
-    )
-
-
-# ============================================================
-# ITEM VALIDATION
-# ============================================================
-
-def validate_item_id(
-    item_id: Any,
-) -> str:
-    """
-    Validate a collectible/item identifier.
-    """
-
-    normalized = require_string(
-        item_id,
-        "item_id",
-        min_length=1,
-        max_length=128,
-    )
-
-    if (
-        "/" in normalized
-        or "\\" in normalized
-    ):
-        raise ValueError(
-            "item_id contains invalid characters."
-        )
+    if normalized not in ALLOWED_RECORDING_TYPES:
+        raise ValidationError("Unsupported recording type.")
 
     return normalized
 
 
-# ============================================================
-# HIDDEN WORD VALIDATION
-# ============================================================
+def validate_collectible_item(item: Any) -> str:
+    normalized = _require_non_empty_string(
+        item,
+        "item",
+        max_length=32,
+    ).casefold()
 
-def validate_hidden_word(
-    word: Any,
-) -> str:
-    """
-    Normalize a discovered hidden word.
+    if normalized not in ALLOWED_COLLECTIBLE_ITEMS:
+        raise ValidationError("Unsupported collectible item.")
 
-    Case differences should not create duplicate words.
-    """
+    return normalized
 
-    normalized = require_string(
+
+def validate_hidden_word(word: Any) -> str:
+    return _require_non_empty_string(
         word,
         "word",
-        min_length=1,
-        max_length=128,
+        max_length=MAX_WORD_LENGTH,
     )
 
-    return normalized.casefold()
+
+def validate_code(code: Any) -> str:
+    return _require_non_empty_string(
+        code,
+        "code",
+        max_length=MAX_CODE_LENGTH,
+    )
+
+
+def validate_answer(answer: Any) -> str:
+    return _require_non_empty_string(
+        answer,
+        "answer",
+        max_length=MAX_CODE_LENGTH,
+    )
+
+
+def validate_expected_version(version: Any) -> int:
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValidationError("expected_version must be an integer.")
+
+    if version < 0:
+        raise ValidationError("expected_version cannot be negative.")
+
+    return version
+
+
+def validate_expected_state(state: Any) -> str:
+    return _require_non_empty_string(
+        state,
+        "expected_state",
+        max_length=64,
+    )
+
+
+def validate_quest_transition(
+    current_state: Any,
+    next_state: Any,
+) -> tuple[str, str]:
+    current = _require_non_empty_string(
+        current_state,
+        "current_state",
+        max_length=64,
+    )
+
+    next_value = _require_non_empty_string(
+        next_state,
+        "next_state",
+        max_length=64,
+    )
+
+    if current == next_value:
+        raise ValidationError("Current state and next state must be different.")
+
+    return current, next_value
+
+
+def validate_level_payload(data: Any) -> dict[str, Any]:
+    payload = _require_mapping(data)
+
+    level = validate_level(payload.get("level"))
+    answer = validate_answer(payload.get("answer"))
+
+    return {
+        "level": level,
+        "answer": answer,
+    }
+
+
+def validate_collectible_payload(data: Any) -> dict[str, Any]:
+    payload = _require_mapping(data)
+
+    item = validate_collectible_item(payload.get("item"))
+
+    return {
+        "item": item,
+    }
+
+
+def validate_word_payload(data: Any) -> dict[str, Any]:
+    payload = _require_mapping(data)
+
+    word = validate_hidden_word(payload.get("word"))
+
+    return {
+        "word": word,
+    }
+
+
+def validate_ticket_payload(data: Any) -> dict[str, Any]:
+    payload = _require_mapping(data)
+
+    ticket_code = validate_code(payload.get("ticket_code"))
+
+    return {
+        "ticket_code": ticket_code,
+    }
+
+
+def validate_sorting_payload(data: Any) -> dict[str, Any]:
+    payload = _require_mapping(data)
+
+    house = _require_non_empty_string(
+        payload.get("house"),
+        "house",
+        max_length=64,
+    )
+
+    return {
+        "house": house,
+    }
+
+
+def validate_recording_payload(data: Any) -> dict[str, Any]:
+    payload = _require_mapping(data)
+
+    recording_type = validate_recording_type(
+        payload.get("recording_type")
+    )
+
+    return {
+        "recording_type": recording_type,
+    }
+
+
+def validate_optional_string(
+    value: Any,
+    field_name: str,
+    *,
+    max_length: int = MAX_TEXT_LENGTH,
+) -> Optional[str]:
+    if value is None:
+        return None
+
+    return _require_non_empty_string(
+        value,
+        field_name,
+        max_length=max_length,
+    )
+
+
+def validate_boolean(value: Any, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValidationError(f"{field_name} must be a boolean.")
+
+    return value
