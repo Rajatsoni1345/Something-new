@@ -372,21 +372,23 @@ def transition_quest(
             "next_state cannot be empty."
         )
 
+    previous_state = quest.state
+
     if not can_transition(
-        quest.state,
+        previous_state,
         next_state,
     ):
         log_warning(
             logger,
             "invalid_quest_transition",
             session_id=session.session_id,
-            current_state=quest.state,
+            current_state=previous_state,
             requested_state=next_state,
         )
 
         raise ValueError(
             f"Invalid quest transition: "
-            f"{quest.state} -> {next_state}"
+            f"{previous_state} -> {next_state}"
         )
 
     now = utc_now_iso()
@@ -413,7 +415,7 @@ def transition_quest(
         logger,
         "quest_transition",
         session_id=session.session_id,
-        previous_state=quest.state,
+        previous_state=previous_state,
         next_state=next_state,
         timestamp=now,
     )
