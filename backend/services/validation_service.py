@@ -19,6 +19,7 @@ from schemas.common import (
     validate_recording_id,
     validate_session_id,
 )
+
 from schemas.recording import (
     MAX_RECORDING_DURATION_MS,
     MAX_RECORDING_SIZE_BYTES,
@@ -27,23 +28,45 @@ from schemas.recording import (
 )
 
 
+# ============================================================
+# QUEST CONSTANTS
+# ============================================================
+
+MIN_NORMAL_LEVEL = 1
+MAX_NORMAL_LEVEL = 4
+
+
+# ============================================================
+# SESSION / RECORDING IDENTIFIERS
+# ============================================================
+
 def validate_session_identifier(
     session_id: Any,
 ) -> str:
     """
-    Validate a session identifier at the service layer.
+    Validate and normalize a session identifier.
     """
-    return validate_session_id(session_id)
+
+    return validate_session_id(
+        session_id
+    )
 
 
 def validate_recording_identifier(
     recording_id: Any,
 ) -> str:
     """
-    Validate a recording identifier at the service layer.
+    Validate and normalize a recording identifier.
     """
-    return validate_recording_id(recording_id)
 
+    return validate_recording_id(
+        recording_id
+    )
+
+
+# ============================================================
+# RECORDING VALIDATION
+# ============================================================
 
 def validate_recording_type(
     recording_type: Any,
@@ -51,6 +74,7 @@ def validate_recording_type(
     """
     Validate a supported recording type.
     """
+
     return validate_enum(
         recording_type,
         "recording_type",
@@ -62,8 +86,9 @@ def validate_recording_content_type(
     content_type: Any,
 ) -> str:
     """
-    Validate a supported browser video content type.
+    Validate a supported recording MIME type.
     """
+
     normalized = require_string(
         content_type,
         "content_type",
@@ -82,14 +107,21 @@ def validate_recording_size(
     file_size_bytes: Any,
 ) -> int:
     """
-    Validate the maximum accepted recording size.
+    Validate the declared recording size.
     """
-    if isinstance(file_size_bytes, bool):
+
+    if isinstance(
+        file_size_bytes,
+        bool,
+    ):
         raise ValueError(
             "file_size_bytes must be an integer."
         )
 
-    if not isinstance(file_size_bytes, int):
+    if not isinstance(
+        file_size_bytes,
+        int,
+    ):
         raise ValueError(
             "file_size_bytes must be an integer."
         )
@@ -111,14 +143,21 @@ def validate_recording_duration(
     duration_ms: Any,
 ) -> int:
     """
-    Validate the maximum accepted recording duration.
+    Validate the declared recording duration.
     """
-    if isinstance(duration_ms, bool):
+
+    if isinstance(
+        duration_ms,
+        bool,
+    ):
         raise ValueError(
             "duration_ms must be an integer."
         )
 
-    if not isinstance(duration_ms, int):
+    if not isinstance(
+        duration_ms,
+        int,
+    ):
         raise ValueError(
             "duration_ms must be an integer."
         )
@@ -136,16 +175,21 @@ def validate_recording_duration(
     return duration_ms
 
 
+# ============================================================
+# PUBLIC IDENTIFIERS
+# ============================================================
+
 def validate_public_identifier(
     value: Any,
     field_name: str,
 ) -> str:
     """
-    Validate an application-generated/public identifier.
+    Validate an external/public identifier.
 
-    This is deliberately stricter than a generic string because
-    identifiers are frequently used in persistence paths.
+    Used for identifiers that must never contain path
+    separators.
     """
+
     normalized = require_string(
         value,
         field_name,
@@ -166,35 +210,58 @@ def validate_public_identifier(
     return normalized
 
 
+# ============================================================
+# QUEST LEVEL VALIDATION
+# ============================================================
+
 def validate_level(
     level: Any,
 ) -> int:
     """
-    Validate a quest level.
+    Validate a normal Birthday Quest level.
 
-    Level 0 represents the pre-level quest state.
-    Levels 1 through 5 represent the four quest levels plus
-    the final level.
+    Normal quest levels are strictly 1 through 4.
+
+    Level 5 is reserved for the final reveal and is represented
+    by the quest state machine rather than a normal level input.
     """
-    if isinstance(level, bool) or not isinstance(level, int):
+
+    if isinstance(
+        level,
+        bool,
+    ) or not isinstance(
+        level,
+        int,
+    ):
         raise ValueError(
             "level must be an integer."
         )
 
-    if not 0 <= level <= 5:
+    if not (
+        MIN_NORMAL_LEVEL
+        <= level
+        <= MAX_NORMAL_LEVEL
+    ):
         raise ValueError(
-            "level must be between 0 and 5."
+            "level must be between "
+            f"{MIN_NORMAL_LEVEL} and "
+            f"{MAX_NORMAL_LEVEL}."
         )
 
     return level
 
 
+# ============================================================
+# ANSWER VALIDATION
+# ============================================================
+
 def validate_answer(
     answer: Any,
 ) -> str:
     """
-    Validate a player's answer before it reaches quest logic.
+    Validate a quest answer.
     """
+
     return require_string(
         answer,
         "answer",
@@ -203,12 +270,17 @@ def validate_answer(
     )
 
 
+# ============================================================
+# ITEM VALIDATION
+# ============================================================
+
 def validate_item_id(
     item_id: Any,
 ) -> str:
     """
-    Validate a quest item identifier.
+    Validate a collectible/item identifier.
     """
+
     normalized = require_string(
         item_id,
         "item_id",
@@ -216,7 +288,10 @@ def validate_item_id(
         max_length=128,
     )
 
-    if "/" in normalized or "\\" in normalized:
+    if (
+        "/" in normalized
+        or "\\" in normalized
+    ):
         raise ValueError(
             "item_id contains invalid characters."
         )
@@ -224,15 +299,19 @@ def validate_item_id(
     return normalized
 
 
+# ============================================================
+# HIDDEN WORD VALIDATION
+# ============================================================
+
 def validate_hidden_word(
     word: Any,
 ) -> str:
     """
-    Normalize and validate a discovered quest word.
+    Normalize a discovered hidden word.
 
-    The backend will later compare the normalized value against
-    the configured answer for the relevant level.
+    Case differences should not create duplicate words.
     """
+
     normalized = require_string(
         word,
         "word",
