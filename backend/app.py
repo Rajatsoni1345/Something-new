@@ -41,6 +41,7 @@ from routes.sessions import sessions_bp
 from routes.quest import quest_bp
 from routes.recordings import recordings_bp
 from routes.reactions import reactions_bp
+from routes.admin import admin_bp
 
 
 # ============================================================
@@ -142,8 +143,9 @@ def register_blueprints(
         /api/v1/health
         /api/v1/sessions
         /api/v1/quest
-        /api/v1/recordings
-        /api/v1/reactions
+        /api/recordings/...
+        /api/v1/reactions/...
+        /api/v1/admin/...
     """
 
     api_prefix = (
@@ -154,29 +156,71 @@ def register_blueprints(
         or "/api/v1"
     )
 
+    # --------------------------------------------------------
+    # Health
+    # --------------------------------------------------------
+
     app.register_blueprint(
         health_bp,
         url_prefix=f"{api_prefix}/health",
     )
+
+    # --------------------------------------------------------
+    # Sessions
+    # --------------------------------------------------------
 
     app.register_blueprint(
         sessions_bp,
         url_prefix=f"{api_prefix}/sessions",
     )
 
+    # --------------------------------------------------------
+    # Quest
+    # --------------------------------------------------------
+
     app.register_blueprint(
         quest_bp,
         url_prefix=f"{api_prefix}/quest",
     )
 
+    # --------------------------------------------------------
+    # Recordings
+    #
+    # IMPORTANT:
+    # recordings_bp already declares its own:
+    #     /api/recordings
+    #
+    # Therefore no second url_prefix is supplied here.
+    # This prevents accidental double-prefixing.
+    # --------------------------------------------------------
+
     app.register_blueprint(
         recordings_bp,
-        url_prefix=f"{api_prefix}/recordings",
     )
+
+    # --------------------------------------------------------
+    # Reactions
+    #
+    # reactions_bp does not define a complete API prefix,
+    # therefore it receives the centralized API prefix here.
+    # --------------------------------------------------------
 
     app.register_blueprint(
         reactions_bp,
         url_prefix=f"{api_prefix}/reactions",
+    )
+
+    # --------------------------------------------------------
+    # Admin
+    #
+    # admin_bp already declares:
+    #     /api/v1/admin
+    #
+    # Therefore no additional prefix is supplied.
+    # --------------------------------------------------------
+
+    app.register_blueprint(
+        admin_bp,
     )
 
 
