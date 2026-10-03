@@ -1,22 +1,18 @@
 const Camera = (() => {
-  let stream1 = null;
-  let recorder1 = null;
-  let chunks1 = [];
-  let stream2 = null;
-  let recorder2 = null;
-  let chunks2 = [];
+  let stream1 = null, recorder1 = null, chunks1 = [];
+  let stream2 = null, recorder2 = null, chunks2 = [];
+
+  function pickMime() {
+    const opts = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
+    for (const o of opts) if (window.MediaRecorder && MediaRecorder.isTypeSupported(o)) return o;
+    return "";
+  }
 
   async function requestCamera(withMic) {
     return navigator.mediaDevices.getUserMedia({
       video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: !!withMic,
     });
-  }
-
-  function pickMime() {
-    const opts = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
-    for (const o of opts) if (window.MediaRecorder && MediaRecorder.isTypeSupported(o)) return o;
-    return "";
   }
 
   async function startVideo1() {
