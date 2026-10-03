@@ -1,8 +1,13 @@
 """
 Birthday Quest - Request ID Middleware
 
-Assigns a unique request ID to every incoming request and
-returns it to the client through the X-Request-ID header.
+Assigns a trusted server-generated request ID to every incoming
+request and returns it through the X-Request-ID response header.
+
+IMPORTANT:
+- Request IDs are generated server-side.
+- Client-provided request IDs are NOT trusted.
+- Request IDs are useful for logs, diagnostics, and audit events.
 """
 
 from __future__ import annotations
@@ -13,41 +18,27 @@ from utils.ids import generate_request_id
 from utils.logging import log_info
 
 
-# ------------------------------------------------------------
-# HEADER NAME
-# ------------------------------------------------------------
-
 REQUEST_ID_HEADER = "X-Request-ID"
 
 
-# ------------------------------------------------------------
-# REGISTRATION
-# ------------------------------------------------------------
-
-def register_request_id_middleware(app: Flask) -> None:
+def register_request_id_middleware(
+    app: Flask,
+) -> None:
     """
-    Register request ID handling with the Flask application.
+    Register request ID middleware.
     """
 
     @app.before_request
     def attach_request_id() -> None:
         """
-        Use a client-supplied request ID only when it is a valid,
-        bounded identifier. Otherwise generate a fresh one.
+        Generate a fresh trusted request ID for every request.
+
+        A client may send an X-Request-ID header, but it is never
+        reused because the backend must control its own diagnostic
+        identifiers.
         """
 
-        incoming_request_id = request.headers.get(
-            REQUEST_ID_HEADER
-        )
-
-        if (
-            incoming_request_id
-            and 1 <= len(incoming_request_id) <= 128
-            and incoming_request_id.isprintable()
-        ):
-            request_id = incoming_request_id
-        else:
-            request_id = generate_request_id()
+        request_id = generate_request_id()
 
         g.request_id = request_id
 
@@ -60,9 +51,11 @@ def register_request_id_middleware(app: Flask) -> None:
         )
 
     @app.after_request
-    def attach_request_id_header(response):
+    def attach_request_id_header(
+        response,
+    ):
         """
-        Return the request ID to the client.
+        Return the trusted request ID to the client.
         """
 
         request_id = getattr(
