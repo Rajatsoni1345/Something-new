@@ -7,6 +7,7 @@ IMPORTANT:
 - The client cannot directly choose the next quest state.
 - Every transition must be explicitly allowed.
 - Level progression is validated server-side.
+- Level answers are validated server-side.
 - Hidden words are validated server-side.
 - Quest data is persisted through the Firebase service.
 """
@@ -99,11 +100,38 @@ LEVEL_STATES = {
 }
 
 
-# These are temporary server-side placeholders.
+# ============================================================
+# TEMPORARY QUEST ANSWERS
+# ============================================================
+#
+# These are server-side placeholders.
 #
 # IMPORTANT:
-# Actual hidden words will be finalized later as quest content.
-# The frontend must never be treated as the authority for these.
+# The final real answers will be configured later as part of
+# the actual quest content.
+#
+# The frontend must NEVER be treated as the authority for
+# whether an answer is correct.
+#
+
+LEVEL_ANSWERS = {
+    1: "LEVEL_ONE_ANSWER",
+    2: "LEVEL_TWO_ANSWER",
+    3: "LEVEL_THREE_ANSWER",
+    4: "LEVEL_FOUR_ANSWER",
+}
+
+
+# ============================================================
+# TEMPORARY HIDDEN WORDS
+# ============================================================
+#
+# These are also server-side placeholders.
+#
+# The final four hidden words will be finalized when the actual
+# quest content is created.
+#
+
 LEVEL_HIDDEN_WORDS = {
     1: "LEVEL_ONE_WORD",
     2: "LEVEL_TWO_WORD",
@@ -300,7 +328,9 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 # INTERNAL VALIDATION
 # ============================================================
 
-def _validate_session(session: Session) -> None:
+def _validate_session(
+    session: Session,
+) -> None:
     if not isinstance(session, Session):
         raise TypeError(
             "session must be a Session instance."
@@ -332,6 +362,29 @@ def _validate_quest(
         )
 
 
+def _normalize_answer(
+    answer: Any,
+) -> str:
+    if not isinstance(answer, str):
+        raise TypeError(
+            "answer must be a string."
+        )
+
+    normalized = answer.strip().casefold()
+
+    if not normalized:
+        raise ValueError(
+            "answer cannot be empty."
+        )
+
+    if len(normalized) > 512:
+        raise ValueError(
+            "answer is too long."
+        )
+
+    return normalized
+
+
 # ============================================================
 # QUEST CREATION / RETRIEVAL
 # ============================================================
@@ -342,7 +395,7 @@ def create_quest(
     """
     Create a new quest for a session.
 
-    If a quest already exists, the existing quest is returned.
+    If a quest already exists, return the existing quest.
     """
 
     _validate_session(session)
@@ -448,11 +501,10 @@ def transition_quest(
 ) -> Quest:
     """
     Perform one validated quest state transition.
-
-    The client cannot freely choose an arbitrary state.
     """
 
     _validate_session(session)
+
     _validate_quest(
         session,
         quest,
@@ -527,15 +579,20 @@ def complete_level(
     session: Session,
     quest: Quest,
     level: int,
+    answer: str,
 ) -> Quest:
     """
     Complete one of the four normal quest levels.
+
+    The level number AND the submitted answer are validated
+    server-side.
 
     Level 5 is intentionally not accepted here.
     Final Reveal has its own dedicated function.
     """
 
     _validate_session(session)
+
     _validate_quest(
         session,
         quest,
@@ -550,6 +607,31 @@ def complete_level(
         raise ValueError(
             "Invalid quest level. "
             "Only levels 1 through 4 are valid."
+        )
+
+    normalized_answer = _normalize_answer(
+        answer
+    )
+
+    expected_answer = LEVEL_ANSWERS.get(
+        level
+    )
+
+    if expected_answer is None:
+        raise ValueError(
+            "No answer is configured for this level."
+        )
+
+    if normalized_answer != expected_answer.casefold():
+        log_warning(
+            logger,
+            "incorrect_level_answer",
+            session_id=session.session_id,
+            level=level,
+        )
+
+        raise ValueError(
+            "The submitted answer is incorrect."
         )
 
     expected_current_level = level - 1
@@ -579,7 +661,9 @@ def complete_level(
         quest.completed_levels
     )
 
-    completed_levels.append(level)
+    completed_levels.append(
+        level
+    )
 
     completed_levels = sorted(
         set(completed_levels)
@@ -630,11 +714,10 @@ def collect_item(
 ) -> Quest:
     """
     Collect one of the three magical quest items.
-
-    The quest advances automatically after all three are collected.
     """
 
     _validate_session(session)
+
     _validate_quest(
         session,
         quest,
@@ -711,7 +794,9 @@ def collect_item(
         "quest_item_collected",
         session_id=session.session_id,
         item_id=item_id,
-        items_collected=len(collected_items),
+        items_collected=len(
+            collected_items
+        ),
     )
 
     return quest
@@ -730,6 +815,7 @@ def collect_ticket(
     """
 
     _validate_session(session)
+
     _validate_quest(
         session,
         quest,
@@ -787,6 +873,7 @@ def complete_train(
     """
 
     _validate_session(session)
+
     _validate_quest(
         session,
         quest,
@@ -844,6 +931,7 @@ def complete_sorting(
     """
 
     _validate_session(session)
+
     _validate_quest(
         session,
         quest,
@@ -896,10 +984,10 @@ def discover_word(
     Validate and record the next hidden quest word.
 
     The client cannot invent arbitrary hidden words.
-    The backend determines which word is expected next.
     """
 
     _validate_session(session)
+
     _validate_quest(
         session,
         quest,
@@ -915,6 +1003,11 @@ def discover_word(
     if not normalized_word:
         raise ValueError(
             "word cannot be empty."
+        )
+
+    if len(normalized_word) > 128:
+        raise ValueError(
+            "word is too long."
         )
 
     discovered_count = len(
@@ -939,6 +1032,13 @@ def discover_word(
     expected_word = expected_word.casefold()
 
     if normalized_word != expected_word:
+        log_warning(
+            logger,
+            "incorrect_hidden_word",
+            session_id=session.session_id,
+            word_index=discovered_count + 1,
+        )
+
         raise ValueError(
             "The submitted hidden word is not valid."
         )
@@ -999,6 +1099,7 @@ def unlock_final_reveal(
     """
 
     _validate_session(session)
+
     _validate_quest(
         session,
         quest,
