@@ -28,28 +28,21 @@ from firebase_admin import credentials
 from firebase_admin import firestore
 
 
-# ============================================================
-# TYPES
-# ============================================================
-
-T = TypeVar(
-    "T"
-)
+T = TypeVar("T")
 
 
 # ============================================================
-# FIREBASE STATE
+# GLOBAL FIREBASE STATE
 # ============================================================
 
 _firebase_lock = threading.RLock()
 
 _firebase_app = None
-
 _firestore_client = None
 
 
 # ============================================================
-# FIREBASE CREDENTIALS
+# CREDENTIALS
 # ============================================================
 
 def _get_credentials() -> credentials.Certificate:
@@ -57,8 +50,7 @@ def _get_credentials() -> credentials.Certificate:
     Build Firebase service-account credentials from environment
     variables.
 
-    Credentials are imported lazily to avoid requiring Firebase
-    configuration merely to import this module.
+    No credential file is written to disk.
     """
 
     from config import get_config
@@ -92,9 +84,7 @@ def _get_credentials() -> credentials.Certificate:
         "private_key": config.FIREBASE_PRIVATE_KEY,
         "client_email": config.FIREBASE_CLIENT_EMAIL,
         "client_id": config.FIREBASE_CLIENT_ID,
-        "token_uri": (
-            "https://oauth2.googleapis.com/token"
-        ),
+        "token_uri": "https://oauth2.googleapis.com/token",
     }
 
     return credentials.Certificate(
@@ -108,10 +98,7 @@ def _get_credentials() -> credentials.Certificate:
 
 def get_firebase_app():
     """
-    Return the initialized Firebase application.
-
-    Initialization is lazy and protected by a lock so concurrent
-    requests cannot initialize multiple default Firebase apps.
+    Lazily initialize and return the Firebase Admin app.
     """
 
     global _firebase_app
@@ -129,8 +116,10 @@ def get_firebase_app():
         except ValueError:
             firebase_credential = _get_credentials()
 
-            _firebase_app = firebase_admin.initialize_app(
-                firebase_credential
+            _firebase_app = (
+                firebase_admin.initialize_app(
+                    firebase_credential
+                )
             )
 
         return _firebase_app
@@ -142,9 +131,7 @@ def get_firebase_app():
 
 def get_firestore_client():
     """
-    Return the shared Firestore client.
-
-    The client is initialized only once and reused.
+    Lazily initialize and return the shared Firestore client.
     """
 
     global _firestore_client
@@ -172,11 +159,6 @@ def get_firestore_client():
 def create_transaction():
     """
     Create a new Firestore transaction.
-
-    The caller is responsible for:
-    - reading documents through the transaction
-    - applying transactional writes
-    - committing the transaction
     """
 
     client = get_firestore_client()
@@ -190,17 +172,20 @@ def run_transaction(
     **kwargs: Any,
 ) -> T:
     """
-    Execute a callback inside a Firestore transaction.
+    Execute a callable inside a Firestore transaction.
 
-    The callback receives the transaction object as its first
-    argument.
+    Firebase Admin's @firestore.transactional decorator is used
+    internally so transaction retries and commit behavior are
+    handled by the Firestore client.
+
+    The callback receives the transaction as its first argument.
 
     Example:
 
         def operation(transaction):
             snapshot = transaction.get(document)
             ...
-            transaction.update(document, {...})
+            transaction.update(document, data)
             return result
 
         result = run_transaction(operation)
@@ -213,17 +198,23 @@ def run_transaction(
 
     transaction = create_transaction()
 
-    return transaction.callable(
-        callback
-    )(
+    @firestore.transactional
+    def transactional_callback(
         transaction,
-        *args,
-        **kwargs,
+    ):
+        return callback(
+            transaction,
+            *args,
+            **kwargs,
+        )
+
+    return transactional_callback(
+        transaction
     )
 
 
 # ============================================================
-# COLLECTION ACCESS
+# COLLECTION / DOCUMENT REFERENCES
 # ============================================================
 
 def get_collection(
@@ -250,17 +241,14 @@ def get_collection(
 
     if "/" in collection_name:
         raise ValueError(
-            "collection_name must contain only one collection name."
+            "collection_name must contain only one "
+            "collection name."
         )
 
     return get_firestore_client().collection(
         collection_name
     )
 
-
-# ============================================================
-# DOCUMENT ACCESS
-# ============================================================
 
 def get_document(
     collection_name: str,
@@ -298,7 +286,7 @@ def get_document(
 
 
 # ============================================================
-# READ DOCUMENT
+# READ OPERATIONS
 # ============================================================
 
 def get_document_data(
@@ -306,9 +294,7 @@ def get_document_data(
     document_id: str,
 ) -> dict[str, Any] | None:
     """
-    Read a Firestore document.
-
-    Returns None when the document does not exist.
+    Read a Firestore document and return a plain dictionary.
     """
 
     document = get_document(
@@ -326,13 +312,11 @@ def get_document_data(
     if data is None:
         return None
 
-    return dict(
-        data
-    )
+    return dict(data)
 
 
 # ============================================================
-# SET DOCUMENT
+# WRITE OPERATIONS
 # ============================================================
 
 def set_document_data(
@@ -341,7 +325,7 @@ def set_document_data(
     data: dict[str, Any],
 ) -> None:
     """
-    Replace or create a Firestore document.
+    Create or completely replace a Firestore document.
     """
 
     if not isinstance(
@@ -355,14 +339,8 @@ def set_document_data(
     get_document(
         collection_name,
         document_id,
-    ).set(
-        data
-    )
+    ).set(data)
 
-
-# ============================================================
-# CREATE DOCUMENT
-# ============================================================
 
 def create_document_data(
     collection_name: str,
@@ -372,7 +350,7 @@ def create_document_data(
     """
     Create a Firestore document.
 
-    Raises an error if the document already exists.
+    Fails if the document already exists.
     """
 
     if not isinstance(
@@ -386,14 +364,8 @@ def create_document_data(
     get_document(
         collection_name,
         document_id,
-    ).create(
-        data
-    )
+    ).create(data)
 
-
-# ============================================================
-# UPDATE DOCUMENT
-# ============================================================
 
 def update_document_data(
     collection_name: str,
@@ -420,14 +392,8 @@ def update_document_data(
     get_document(
         collection_name,
         document_id,
-    ).update(
-        data
-    )
+    ).update(data)
 
-
-# ============================================================
-# DELETE DOCUMENT
-# ============================================================
 
 def delete_document(
     collection_name: str,
