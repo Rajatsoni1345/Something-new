@@ -1,12 +1,12 @@
-/* ==========================================================
-   CINEMATIC AUDIO SYSTEM - Continuous BGM + SFX
-   All generated via WebAudio - no external files
-   ========================================================== */
+/* ============================================================
+   CINEMATIC AUDIO SYSTEM — Continuous BGM + SFX
+   Everything synthesized via Web Audio. No external files.
+   ============================================================ */
 
 const Audio2 = (() => {
   let ctx = null;
-  let masterGain = null;
-  let reverbNode = null;
+  let master = null;
+  let reverb = null;
   let layers = {};
   let started = false;
   let currentScene = "intro";
@@ -14,12 +14,12 @@ const Audio2 = (() => {
   function ensureCtx() {
     if (!ctx) {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
-      masterGain = ctx.createGain();
-      masterGain.gain.value = 0.7;
-      masterGain.connect(ctx.destination);
+      master = ctx.createGain();
+      master.gain.value = 0.65;
+      master.connect(ctx.destination);
 
-      // Reverb (cathedral) - generated impulse
-      reverbNode = ctx.createConvolver();
+      // Cathedral-style reverb
+      reverb = ctx.createConvolver();
       const rate = ctx.sampleRate;
       const length = rate * 4;
       const impulse = ctx.createBuffer(2, length, rate);
@@ -29,18 +29,17 @@ const Audio2 = (() => {
           data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 3.2);
         }
       }
-      reverbNode.buffer = impulse;
-      const reverbGain = ctx.createGain();
-      reverbGain.gain.value = 0.4;
-      reverbNode.connect(reverbGain).connect(masterGain);
+      reverb.buffer = impulse;
+      const revGain = ctx.createGain();
+      revGain.gain.value = 0.35;
+      reverb.connect(revGain).connect(master);
     }
     if (ctx.state === "suspended") ctx.resume();
     return ctx;
   }
 
-  // ============ BGM LAYERS ============
-
-  function createDrone(freq, gainVal, type) {
+  // ============ LAYER BUILDERS ============
+  function makeDrone(freq, type) {
     const c = ensureCtx();
     const osc = c.createOscillator();
     osc.type = type || "sine";
@@ -48,25 +47,25 @@ const Audio2 = (() => {
     const g = c.createGain();
     g.gain.value = 0;
     osc.connect(g);
-    g.connect(masterGain);
-    g.connect(reverbNode);
+    g.connect(master);
+    g.connect(reverb);
     osc.start();
     return { osc, gain: g };
   }
 
-  function createPad(frequencies, gainVal) {
+  function makePad(freqs) {
     const c = ensureCtx();
     const group = c.createGain();
     group.gain.value = 0;
-    group.connect(masterGain);
-    group.connect(reverbNode);
+    group.connect(master);
+    group.connect(reverb);
     const oscs = [];
-    frequencies.forEach(f => {
+    freqs.forEach(f => {
       const osc = c.createOscillator();
       osc.type = "sine";
       osc.frequency.value = f;
       const g = c.createGain();
-      g.gain.value = 1 / frequencies.length;
+      g.gain.value = 1 / freqs.length;
       osc.connect(g).connect(group);
       osc.start();
       oscs.push(osc);
@@ -74,198 +73,144 @@ const Audio2 = (() => {
     return { oscs, gain: group };
   }
 
-  function createNoise() {
+  function makeNoise(filterFreq, Q) {
     const c = ensureCtx();
-    const bufferSize = 2 * c.sampleRate;
-    const buffer = c.createBuffer(1, bufferSize, c.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * 0.3;
+    const bufSize = 2 * c.sampleRate;
+    const buf = c.createBuffer(1, bufSize, c.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = (Math.random() * 2 - 1) * 0.3;
     const src = c.createBufferSource();
-    src.buffer = buffer;
+    src.buffer = buf;
     src.loop = true;
-    const filter = c.createBiquadFilter();
-    filter.type = "bandpass";
-    filter.frequency.value = 800;
-    filter.Q.value = 0.8;
+    const filt = c.createBiquadFilter();
+    filt.type = "bandpass";
+    filt.frequency.value = filterFreq || 800;
+    filt.Q.value = Q || 0.8;
     const g = c.createGain();
     g.gain.value = 0;
-    src.connect(filter).connect(g).connect(masterGain);
+    src.connect(filt).connect(g).connect(master);
     src.start();
-    return { src, gain: g, filter };
+    return { src, gain: g, filt };
   }
 
-  function fadeTo(node, target, duration) {
+  function fadeTo(node, target, dur) {
     if (!node || !node.gain) return;
     const now = ctx.currentTime;
     node.gain.cancelScheduledValues(now);
     node.gain.setValueAtTime(node.gain.value, now);
-    node.gain.linearRampToValueAtTime(target, now + duration);
+    node.gain.linearRampToValueAtTime(target, now + dur);
   }
 
-  // ============ BGM CONTROL ============
-
+  // ============ START BGM ============
   function startAmbient() {
     if (started) return;
     started = true;
     ensureCtx();
-
-    // Base layers - always present
-    layers.droneLow = createDrone(55, 0, "sine");       // 55Hz - deep
-    layers.droneHigh = createDrone(110, 0, "sine");     // 110Hz harmonic
-    layers.noise = createNoise();
-    layers.noise.filter.frequency.value = 200;
-    layers.noise.filter.Q.value = 0.3;
-
-    // Warm pad - magical presence
-    layers.padWarm = createPad([220, 277.18, 329.63], 0);   // A3 C#4 E4 (A major)
-    // Dark pad - mystery
-    layers.padDark = createPad([110, 130.81, 164.81], 0);   // A2 C3 E3 (A minor)
-
-    // Initial scene
-    setScene("intro", 3);
+    layers.droneLow  = makeDrone(55, "sine");
+    layers.droneHigh = makeDrone(110, "sine");
+    layers.padWarm   = makePad([220, 277.18, 329.63, 415.30]); // A major 7
+    layers.padDark   = makePad([110, 130.81, 155.56, 196.00]); // A minor-ish
+    layers.noise     = makeNoise(200, 0.4);
+    setScene("intro", 4);
   }
 
-  function setScene(sceneName, fadeTime) {
+  function setScene(name, dur) {
     if (!started) return;
-    fadeTime = fadeTime || 3;
-    currentScene = sceneName;
+    dur = dur || 3;
+    currentScene = name;
 
-    // Reset all gains first
-    const reset = (t) => {
-      fadeTo(layers.droneLow, t.droneLow || 0, fadeTime);
-      fadeTo(layers.droneHigh, t.droneHigh || 0, fadeTime);
-      fadeTo(layers.padWarm, t.padWarm || 0, fadeTime);
-      fadeTo(layers.padDark, t.padDark || 0, fadeTime);
-      fadeTo(layers.noise, t.noise || 0, fadeTime);
-    };
-
-    // Scene-specific mixes
     const mixes = {
-      intro:      { droneLow: 0.14, droneHigh: 0.06, padWarm: 0,    padDark: 0.05, noise: 0.02 },
-      gate:       { droneLow: 0.20, droneHigh: 0.10, padWarm: 0,    padDark: 0.08, noise: 0.04 },
-      spell:      { droneLow: 0.16, droneHigh: 0.10, padWarm: 0.05, padDark: 0.04, noise: 0.02 },
-      welcome:    { droneLow: 0.10, droneHigh: 0.08, padWarm: 0.14, padDark: 0,    noise: 0.01 },
-      birthday:   { droneLow: 0.08, droneHigh: 0.06, padWarm: 0.10, padDark: 0.03, noise: 0.01 },
-      candle:     { droneLow: 0.10, droneHigh: 0.08, padWarm: 0.08, padDark: 0.05, noise: 0.02 },
-      confetti:   { droneLow: 0.06, droneHigh: 0.04, padWarm: 0.16, padDark: 0,    noise: 0.02 },
-      wall:       { droneLow: 0.18, droneHigh: 0.10, padWarm: 0,    padDark: 0.10, noise: 0.06 },
-      alley:      { droneLow: 0.10, droneHigh: 0.08, padWarm: 0.08, padDark: 0.06, noise: 0.02 },
-      train:      { droneLow: 0.14, droneHigh: 0.10, padWarm: 0.04, padDark: 0.08, noise: 0.05 },
-      castle:     { droneLow: 0.12, droneHigh: 0.08, padWarm: 0.10, padDark: 0.06, noise: 0.02 },
-      hat:        { droneLow: 0.10, droneHigh: 0.06, padWarm: 0.08, padDark: 0.06, noise: 0.01 },
-      levels:     { droneLow: 0.14, droneHigh: 0.08, padWarm: 0.04, padDark: 0.08, noise: 0.02 },
-      finale:     { droneLow: 0.10, droneHigh: 0.06, padWarm: 0.14, padDark: 0.04, noise: 0.01 },
-      chest:      { droneLow: 0.14, droneHigh: 0.08, padWarm: 0.10, padDark: 0.06, noise: 0.02 },
-      end:        { droneLow: 0.08, droneHigh: 0.04, padWarm: 0.06, padDark: 0.08, noise: 0.01 },
+      intro:    { dL: 0.16, dH: 0.07, pW: 0,    pD: 0.06, n: 0.02 },
+      gate:     { dL: 0.22, dH: 0.11, pW: 0,    pD: 0.09, n: 0.04 },
+      storm:    { dL: 0.24, dH: 0.12, pW: 0,    pD: 0.12, n: 0.08 },
+      cake:     { dL: 0.08, dH: 0.06, pW: 0.12, pD: 0.03, n: 0.01 },
+      confetti: { dL: 0.06, dH: 0.05, pW: 0.18, pD: 0,    n: 0.02 },
+      alley:    { dL: 0.10, dH: 0.09, pW: 0.10, pD: 0.05, n: 0.03 },
+      train:    { dL: 0.15, dH: 0.11, pW: 0.04, pD: 0.10, n: 0.06 },
+      castle:   { dL: 0.12, dH: 0.09, pW: 0.12, pD: 0.06, n: 0.02 },
+      hat:      { dL: 0.10, dH: 0.07, pW: 0.09, pD: 0.07, n: 0.01 },
+      levels:   { dL: 0.14, dH: 0.09, pW: 0.05, pD: 0.09, n: 0.02 },
+      finale:   { dL: 0.10, dH: 0.07, pW: 0.16, pD: 0.05, n: 0.01 },
+      video:    { dL: 0.06, dH: 0.04, pW: 0.08, pD: 0.04, n: 0.01 },
+      end:      { dL: 0.08, dH: 0.05, pW: 0.07, pD: 0.09, n: 0.01 },
     };
-
-    reset(mixes[sceneName] || mixes.intro);
+    const m = mixes[name] || mixes.intro;
+    fadeTo(layers.droneLow, m.dL, dur);
+    fadeTo(layers.droneHigh, m.dH, dur);
+    fadeTo(layers.padWarm, m.pW, dur);
+    fadeTo(layers.padDark, m.pD, dur);
+    fadeTo(layers.noise, m.n, dur);
   }
 
   // ============ SFX ============
-
   function play(type) {
     const c = ensureCtx();
     const now = c.currentTime;
 
     if (type === "knock") {
-      // Deep wooden knock
       const osc = c.createOscillator();
       osc.type = "sine";
-      osc.frequency.setValueAtTime(140, now);
+      osc.frequency.setValueAtTime(150, now);
       osc.frequency.exponentialRampToValueAtTime(60, now + 0.15);
       const g = c.createGain();
       g.gain.setValueAtTime(0.6, now);
       g.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
-      osc.connect(g).connect(masterGain);
-      g.connect(reverbNode);
+      osc.connect(g).connect(master);
+      g.connect(reverb);
       osc.start(now); osc.stop(now + 0.5);
-      // Impact noise
-      const n = c.createBufferSource();
-      const buf = c.createBuffer(1, c.sampleRate * 0.1, c.sampleRate);
-      const d = buf.getChannelData(0);
-      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 3);
-      n.buffer = buf;
-      const nf = c.createBiquadFilter();
-      nf.type = "lowpass";
-      nf.frequency.value = 400;
-      const ng = c.createGain();
-      ng.gain.setValueAtTime(0.5, now);
-      ng.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
-      n.connect(nf).connect(ng).connect(masterGain);
-      n.start(now); n.stop(now + 0.3);
 
     } else if (type === "chime") {
-      // Ethereal chime
       [880, 1320, 1760].forEach((f, i) => {
-        const osc = c.createOscillator();
-        osc.type = "sine";
-        osc.frequency.value = f;
+        const o = c.createOscillator();
+        o.type = "sine";
+        o.frequency.value = f;
         const g = c.createGain();
         const t = now + i * 0.08;
         g.gain.setValueAtTime(0, t);
         g.gain.linearRampToValueAtTime(0.09 - i * 0.02, t + 0.02);
         g.gain.exponentialRampToValueAtTime(0.001, t + 1.2);
-        osc.connect(g).connect(masterGain);
-        g.connect(reverbNode);
-        osc.start(t); osc.stop(t + 1.3);
+        o.connect(g).connect(master);
+        g.connect(reverb);
+        o.start(t); o.stop(t + 1.3);
       });
 
     } else if (type === "boom") {
-      // Massive bass impact
       const osc = c.createOscillator();
       osc.type = "sine";
-      osc.frequency.setValueAtTime(90, now);
+      osc.frequency.setValueAtTime(95, now);
       osc.frequency.exponentialRampToValueAtTime(28, now + 1.1);
       const g = c.createGain();
       g.gain.setValueAtTime(0.75, now);
       g.gain.exponentialRampToValueAtTime(0.001, now + 1.4);
-      osc.connect(g).connect(masterGain);
+      osc.connect(g).connect(master);
       osc.start(now); osc.stop(now + 1.5);
-      // Sub noise
-      const n = c.createBufferSource();
-      const buf = c.createBuffer(1, c.sampleRate * 0.4, c.sampleRate);
-      const d = buf.getChannelData(0);
-      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 2);
-      n.buffer = buf;
-      const nf = c.createBiquadFilter();
-      nf.type = "lowpass";
-      nf.frequency.value = 200;
-      const ng = c.createGain();
-      ng.gain.setValueAtTime(0.4, now);
-      ng.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
-      n.connect(nf).connect(ng).connect(masterGain);
-      n.start(now); n.stop(now + 1.2);
 
     } else if (type === "sparkle") {
-      // High sparkling sweep
       const osc = c.createOscillator();
       osc.type = "triangle";
       osc.frequency.setValueAtTime(1800, now);
       osc.frequency.exponentialRampToValueAtTime(3200, now + 0.4);
       const g = c.createGain();
-      g.gain.setValueAtTime(0.06, now);
+      g.gain.setValueAtTime(0.07, now);
       g.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
-      osc.connect(g).connect(masterGain);
-      g.connect(reverbNode);
+      osc.connect(g).connect(master);
+      g.connect(reverb);
       osc.start(now); osc.stop(now + 0.8);
 
     } else if (type === "wrong") {
-      // Dissonant low
       [140, 148].forEach(f => {
-        const osc = c.createOscillator();
-        osc.type = "sawtooth";
-        osc.frequency.setValueAtTime(f, now);
-        osc.frequency.exponentialRampToValueAtTime(f * 0.6, now + 0.5);
+        const o = c.createOscillator();
+        o.type = "sawtooth";
+        o.frequency.setValueAtTime(f, now);
+        o.frequency.exponentialRampToValueAtTime(f * 0.6, now + 0.5);
         const g = c.createGain();
         g.gain.setValueAtTime(0.12, now);
         g.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
-        osc.connect(g).connect(masterGain);
-        osc.start(now); osc.stop(now + 0.8);
+        o.connect(g).connect(master);
+        o.start(now); o.stop(now + 0.8);
       });
 
     } else if (type === "whoosh") {
-      // Air whoosh (candle blow)
       const n = c.createBufferSource();
       const buf = c.createBuffer(1, c.sampleRate * 0.6, c.sampleRate);
       const d = buf.getChannelData(0);
@@ -273,21 +218,51 @@ const Audio2 = (() => {
       n.buffer = buf;
       const f = c.createBiquadFilter();
       f.type = "bandpass";
-      f.frequency.setValueAtTime(600, now);
-      f.frequency.exponentialRampToValueAtTime(200, now + 0.5);
+      f.frequency.setValueAtTime(700, now);
+      f.frequency.exponentialRampToValueAtTime(220, now + 0.5);
       f.Q.value = 1.5;
       const g = c.createGain();
       g.gain.setValueAtTime(0.35, now);
       g.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
-      n.connect(f).connect(g).connect(masterGain);
+      n.connect(f).connect(g).connect(master);
       n.start(now); n.stop(now + 0.7);
+
+    } else if (type === "thunder") {
+      const n = c.createBufferSource();
+      const buf = c.createBuffer(1, c.sampleRate * 1.4, c.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 2);
+      n.buffer = buf;
+      const f = c.createBiquadFilter();
+      f.type = "lowpass";
+      f.frequency.value = 180;
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.35, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 1.4);
+      n.connect(f).connect(g).connect(master);
+      n.start(now); n.stop(now + 1.4);
+
+    } else if (type === "train") {
+      const n = c.createBufferSource();
+      const buf = c.createBuffer(1, c.sampleRate * 3, c.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (0.5 + 0.5 * Math.sin(i * 0.0004)) * Math.pow(1 - i / d.length, 0.8);
+      n.buffer = buf;
+      const f = c.createBiquadFilter();
+      f.type = "lowpass";
+      f.frequency.value = 400;
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.15, now);
+      g.gain.linearRampToValueAtTime(0.25, now + 0.5);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 3);
+      n.connect(f).connect(g).connect(master);
+      n.start(now); n.stop(now + 3);
     }
   }
 
-  // ============ INTERACTION DETECTION ============
-
+  // ============ VOICE DETECTION (Lumos) ============
   function listenForWord(targetWord, timeoutMs) {
-    timeoutMs = timeoutMs || 8000;
+    timeoutMs = timeoutMs || 10000;
     return new Promise((resolve) => {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) return resolve(false);
@@ -311,8 +286,9 @@ const Audio2 = (() => {
     });
   }
 
+  // ============ BLOW DETECTION (Candle) ============
   function listenForBlow(durationMs) {
-    durationMs = durationMs || 8000;
+    durationMs = durationMs || 10000;
     return new Promise(async (resolve) => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -323,12 +299,14 @@ const Audio2 = (() => {
         src.connect(analyser);
         const buf = new Uint8Array(analyser.frequencyBinCount);
         const start = Date.now();
+        let hits = 0;
         const check = () => {
           analyser.getByteFrequencyData(buf);
           let sum = 0;
-          for (let i = 0; i < buf.length; i++) sum += buf[i];
-          const avg = sum / buf.length;
-          if (avg > 50) {
+          for (let i = 1; i < 12; i++) sum += buf[i];
+          const avg = sum / 11;
+          if (avg > 45) hits++; else hits = Math.max(0, hits - 1);
+          if (hits >= 2) {
             stream.getTracks().forEach(t => t.stop());
             return resolve(true);
           }
