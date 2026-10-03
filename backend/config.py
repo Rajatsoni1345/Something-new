@@ -8,6 +8,7 @@ IMPORTANT:
 - Development may use safe local defaults.
 - Production requires required secrets to be supplied through
   environment variables.
+- Admin identities are configured through environment variables.
 """
 
 from __future__ import annotations
@@ -32,8 +33,12 @@ load_dotenv()
 # HELPERS
 # ------------------------------------------------------------
 
-def _get_env(name: str, default: str | None = None) -> str | None:
+def _get_env(
+    name: str,
+    default: str | None = None,
+) -> str | None:
     """Return a trimmed environment variable or the default."""
+
     value = os.getenv(name)
 
     if value is None:
@@ -44,8 +49,12 @@ def _get_env(name: str, default: str | None = None) -> str | None:
     return value if value else default
 
 
-def _get_int_env(name: str, default: int) -> int:
+def _get_int_env(
+    name: str,
+    default: int,
+) -> int:
     """Read a positive integer environment variable safely."""
+
     raw_value = _get_env(name)
 
     if raw_value is None:
@@ -66,16 +75,24 @@ def _get_int_env(name: str, default: int) -> int:
     return value
 
 
-def _get_list_env(name: str, default: str = "") -> list[str]:
+def _get_list_env(
+    name: str,
+    default: str = "",
+) -> list[str]:
     """
     Read a comma-separated environment variable.
 
     Example:
-        TRUSTED_HOSTS=localhost,127.0.0.1
+        ADMIN_UIDS=uid_one,uid_two
+
     becomes:
-        ["localhost", "127.0.0.1"]
+        ["uid_one", "uid_two"]
     """
-    raw_value = _get_env(name, default)
+
+    raw_value = _get_env(
+        name,
+        default,
+    )
 
     if not raw_value:
         return []
@@ -87,17 +104,23 @@ def _get_list_env(name: str, default: str = "") -> list[str]:
     ]
 
 
-def _normalize_private_key(value: str | None) -> str | None:
+def _normalize_private_key(
+    value: str | None,
+) -> str | None:
     """
     Normalize Firebase private key formatting.
 
-    Environment variables commonly store newline characters as
-    the literal sequence '\\n'.
+    Environment variables commonly store newline characters
+    as the literal sequence '\\n'.
     """
+
     if not value:
         return None
 
-    return value.replace("\\n", "\n")
+    return value.replace(
+        "\\n",
+        "\n",
+    )
 
 
 # ------------------------------------------------------------
@@ -109,7 +132,9 @@ DEFAULT_FLASK_ENV: Final[str] = "development"
 DEFAULT_LOG_LEVEL: Final[str] = "INFO"
 
 # 250 MB maximum incoming request size.
-DEFAULT_MAX_CONTENT_LENGTH: Final[int] = 250 * 1024 * 1024
+DEFAULT_MAX_CONTENT_LENGTH: Final[int] = (
+    250 * 1024 * 1024
+)
 
 DEFAULT_API_PREFIX: Final[str] = "/api/v1"
 
@@ -125,26 +150,37 @@ class Config:
     # APPLICATION
     # --------------------------------------------------------
 
-    APP_NAME: str = _get_env(
-        "APP_NAME",
-        DEFAULT_APP_NAME,
-    ) or DEFAULT_APP_NAME
+    APP_NAME: str = (
+        _get_env(
+            "APP_NAME",
+            DEFAULT_APP_NAME,
+        )
+        or DEFAULT_APP_NAME
+    )
 
-    FLASK_ENV: str = _get_env(
-        "FLASK_ENV",
-        DEFAULT_FLASK_ENV,
-    ) or DEFAULT_FLASK_ENV
+    FLASK_ENV: str = (
+        _get_env(
+            "FLASK_ENV",
+            DEFAULT_FLASK_ENV,
+        )
+        or DEFAULT_FLASK_ENV
+    )
 
-    API_PREFIX: str = _get_env(
-        "API_PREFIX",
-        DEFAULT_API_PREFIX,
-    ) or DEFAULT_API_PREFIX
+    API_PREFIX: str = (
+        _get_env(
+            "API_PREFIX",
+            DEFAULT_API_PREFIX,
+        )
+        or DEFAULT_API_PREFIX
+    )
 
     # --------------------------------------------------------
-    # SECURITY
+    # APPLICATION SECRET
     # --------------------------------------------------------
 
-    SECRET_KEY: str | None = _get_env("SECRET_KEY")
+    SECRET_KEY: str | None = _get_env(
+        "SECRET_KEY"
+    )
 
     # --------------------------------------------------------
     # REQUEST LIMITS
@@ -196,8 +232,10 @@ class Config:
         "FIREBASE_PRIVATE_KEY_ID"
     )
 
-    FIREBASE_PRIVATE_KEY: str | None = _normalize_private_key(
-        _get_env("FIREBASE_PRIVATE_KEY")
+    FIREBASE_PRIVATE_KEY: str | None = (
+        _normalize_private_key(
+            _get_env("FIREBASE_PRIVATE_KEY")
+        )
     )
 
     FIREBASE_CLIENT_EMAIL: str | None = _get_env(
@@ -225,7 +263,33 @@ class Config:
     )
 
     # --------------------------------------------------------
-    # SECURITY SETTINGS
+    # ADMIN ACCESS
+    # --------------------------------------------------------
+    #
+    # ADMIN_UIDS is the primary authorization mechanism.
+    #
+    # Example:
+    # ADMIN_UIDS=firebase_uid_1,firebase_uid_2
+    #
+    # ADMIN_EMAILS is optional and can be used as an additional
+    # identity allowlist after Firebase token verification.
+    #
+    # These values are never hard-coded into source code.
+    # --------------------------------------------------------
+
+    ADMIN_UIDS: list[str] = _get_list_env(
+        "ADMIN_UIDS"
+    )
+
+    ADMIN_EMAILS: list[str] = [
+        email.lower()
+        for email in _get_list_env(
+            "ADMIN_EMAILS"
+        )
+    ]
+
+    # --------------------------------------------------------
+    # SESSION COOKIE SECURITY
     # --------------------------------------------------------
 
     SESSION_COOKIE_SECURE: bool = True
@@ -264,6 +328,10 @@ class Config:
                 "development, production, testing."
             )
 
+        # ----------------------------------------------------
+        # General configuration validation
+        # ----------------------------------------------------
+
         if cls.MAX_CONTENT_LENGTH <= 0:
             raise ValueError(
                 "MAX_CONTENT_LENGTH must be greater than zero."
@@ -274,18 +342,56 @@ class Config:
                 "API_PREFIX must start with '/'."
             )
 
+        # ----------------------------------------------------
+        # Trusted hosts
+        # ----------------------------------------------------
+
+        if not cls.TRUSTED_HOSTS:
+            raise RuntimeError(
+                "TRUSTED_HOSTS must contain at least one host."
+            )
+
+        # ----------------------------------------------------
+        # Admin configuration
+        # ----------------------------------------------------
+
+        if environment == "production":
+            if not cls.ADMIN_UIDS:
+                raise RuntimeError(
+                    "ADMIN_UIDS must contain at least one "
+                    "authorized Firebase user UID in production."
+                )
+
+        # ----------------------------------------------------
+        # Production secrets
+        # ----------------------------------------------------
+
         if environment == "production":
             required_values = {
                 "SECRET_KEY": cls.SECRET_KEY,
                 "FRONTEND_ORIGIN": cls.FRONTEND_ORIGIN,
                 "FIREBASE_PROJECT_ID": cls.FIREBASE_PROJECT_ID,
-                "FIREBASE_PRIVATE_KEY_ID": cls.FIREBASE_PRIVATE_KEY_ID,
-                "FIREBASE_PRIVATE_KEY": cls.FIREBASE_PRIVATE_KEY,
-                "FIREBASE_CLIENT_EMAIL": cls.FIREBASE_CLIENT_EMAIL,
-                "FIREBASE_CLIENT_ID": cls.FIREBASE_CLIENT_ID,
-                "CLOUDINARY_CLOUD_NAME": cls.CLOUDINARY_CLOUD_NAME,
-                "CLOUDINARY_API_KEY": cls.CLOUDINARY_API_KEY,
-                "CLOUDINARY_API_SECRET": cls.CLOUDINARY_API_SECRET,
+                "FIREBASE_PRIVATE_KEY_ID": (
+                    cls.FIREBASE_PRIVATE_KEY_ID
+                ),
+                "FIREBASE_PRIVATE_KEY": (
+                    cls.FIREBASE_PRIVATE_KEY
+                ),
+                "FIREBASE_CLIENT_EMAIL": (
+                    cls.FIREBASE_CLIENT_EMAIL
+                ),
+                "FIREBASE_CLIENT_ID": (
+                    cls.FIREBASE_CLIENT_ID
+                ),
+                "CLOUDINARY_CLOUD_NAME": (
+                    cls.CLOUDINARY_CLOUD_NAME
+                ),
+                "CLOUDINARY_API_KEY": (
+                    cls.CLOUDINARY_API_KEY
+                ),
+                "CLOUDINARY_API_SECRET": (
+                    cls.CLOUDINARY_API_SECRET
+                ),
             }
 
             missing = [
@@ -357,6 +463,7 @@ def get_config() -> type[Config]:
     """
     Return the configuration class matching FLASK_ENV.
     """
+
     environment = (
         _get_env(
             "FLASK_ENV",
@@ -366,7 +473,9 @@ def get_config() -> type[Config]:
     ).lower()
 
     try:
-        config_class = CONFIG_MAP[environment]
+        config_class = CONFIG_MAP[
+            environment
+        ]
     except KeyError as exc:
         raise ValueError(
             "FLASK_ENV must be one of: "
