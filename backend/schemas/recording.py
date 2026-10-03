@@ -16,13 +16,16 @@ from schemas.common import (
     optional_string,
     reject_unknown_fields,
     require_dict,
-    require_integer,
     require_string,
     validate_enum,
     validate_recording_id,
     validate_session_id,
 )
 
+
+# ============================================================
+# RECORDING CONSTANTS
+# ============================================================
 
 RECORDING_TYPES = frozenset(
     {
@@ -41,9 +44,20 @@ RECORDING_CONTENT_TYPES = frozenset(
     }
 )
 
-MAX_RECORDING_SIZE_BYTES = 250 * 1024 * 1024
-MAX_RECORDING_DURATION_MS = 15 * 60 * 1000
+MAX_RECORDING_SIZE_BYTES = (
+    250 * 1024 * 1024
+)
 
+MAX_RECORDING_DURATION_MS = (
+    15 * 60 * 1000
+)
+
+MAX_FAILURE_REASON_LENGTH = 512
+
+
+# ============================================================
+# REQUEST FIELDS
+# ============================================================
 
 START_RECORDING_FIELDS = frozenset(
     {
@@ -69,14 +83,36 @@ UPLOAD_RECORDING_FIELDS = frozenset(
     }
 )
 
+RECORDING_ID_FIELDS = frozenset(
+    {
+        "session_id",
+        "recording_id",
+    }
+)
+
+FAILED_RECORDING_FIELDS = frozenset(
+    {
+        "session_id",
+        "recording_id",
+        "reason",
+    }
+)
+
+
+# ============================================================
+# START RECORDING
+# ============================================================
 
 def validate_start_recording_request(
     data: Any,
 ) -> dict[str, str]:
     """
-    Validate a request to start a recording lifecycle.
+    Validate a request to start a recording.
     """
-    payload = require_dict(data)
+
+    payload = require_dict(
+        data
+    )
 
     reject_unknown_fields(
         payload,
@@ -88,38 +124,45 @@ def validate_start_recording_request(
         "recording_type",
     }
 
-    missing_fields = required_fields - set(payload)
+    missing_fields = (
+        required_fields - set(payload)
+    )
 
     if missing_fields:
         raise ValueError(
             "Missing required field(s): "
-            + ", ".join(sorted(missing_fields))
+            + ", ".join(
+                sorted(missing_fields)
+            )
             + "."
         )
 
-    session_id = validate_session_id(
-        payload["session_id"]
-    )
-
-    recording_type = validate_enum(
-        payload["recording_type"],
-        "recording_type",
-        RECORDING_TYPES,
-    )
-
     return {
-        "session_id": session_id,
-        "recording_type": recording_type,
+        "session_id": validate_session_id(
+            payload["session_id"]
+        ),
+        "recording_type": validate_enum(
+            payload["recording_type"],
+            "recording_type",
+            RECORDING_TYPES,
+        ),
     }
 
+
+# ============================================================
+# STOP RECORDING
+# ============================================================
 
 def validate_stop_recording_request(
     data: Any,
 ) -> dict[str, str]:
     """
-    Validate a request to stop an existing recording lifecycle.
+    Validate a request to stop a recording.
     """
-    payload = require_dict(data)
+
+    payload = require_dict(
+        data
+    )
 
     reject_unknown_fields(
         payload,
@@ -131,39 +174,43 @@ def validate_stop_recording_request(
         "recording_id",
     }
 
-    missing_fields = required_fields - set(payload)
+    missing_fields = (
+        required_fields - set(payload)
+    )
 
     if missing_fields:
         raise ValueError(
             "Missing required field(s): "
-            + ", ".join(sorted(missing_fields))
+            + ", ".join(
+                sorted(missing_fields)
+            )
             + "."
         )
 
-    session_id = validate_session_id(
-        payload["session_id"]
-    )
-
-    recording_id = validate_recording_id(
-        payload["recording_id"]
-    )
-
     return {
-        "session_id": session_id,
-        "recording_id": recording_id,
+        "session_id": validate_session_id(
+            payload["session_id"]
+        ),
+        "recording_id": validate_recording_id(
+            payload["recording_id"]
+        ),
     }
 
+
+# ============================================================
+# UPLOAD RECORDING METADATA
+# ============================================================
 
 def validate_upload_recording_request(
     data: Any,
 ) -> dict[str, Any]:
     """
-    Validate recording metadata accompanying a video upload.
-
-    The actual multipart file must be validated separately from
-    this JSON metadata.
+    Validate recording metadata used before/during upload.
     """
-    payload = require_dict(data)
+
+    payload = require_dict(
+        data
+    )
 
     reject_unknown_fields(
         payload,
@@ -175,12 +222,16 @@ def validate_upload_recording_request(
         "recording_id",
     }
 
-    missing_fields = required_fields - set(payload)
+    missing_fields = (
+        required_fields - set(payload)
+    )
 
     if missing_fields:
         raise ValueError(
             "Missing required field(s): "
-            + ", ".join(sorted(missing_fields))
+            + ", ".join(
+                sorted(missing_fields)
+            )
             + "."
         )
 
@@ -229,26 +280,24 @@ def validate_upload_recording_request(
     }
 
 
+# ============================================================
+# RECORDING ID REQUEST
+# ============================================================
+
 def validate_recording_id_request(
     data: Any,
 ) -> dict[str, str]:
     """
-    Validate a generic request containing a session and recording ID.
-
-    Useful for future recording-status/recovery endpoints.
+    Validate requests containing only session and recording IDs.
     """
-    payload = require_dict(data)
 
-    allowed_fields = frozenset(
-        {
-            "session_id",
-            "recording_id",
-        }
+    payload = require_dict(
+        data
     )
 
     reject_unknown_fields(
         payload,
-        allowed_fields,
+        RECORDING_ID_FIELDS,
     )
 
     required_fields = {
@@ -256,12 +305,16 @@ def validate_recording_id_request(
         "recording_id",
     }
 
-    missing_fields = required_fields - set(payload)
+    missing_fields = (
+        required_fields - set(payload)
+    )
 
     if missing_fields:
         raise ValueError(
             "Missing required field(s): "
-            + ", ".join(sorted(missing_fields))
+            + ", ".join(
+                sorted(missing_fields)
+            )
             + "."
         )
 
@@ -272,4 +325,81 @@ def validate_recording_id_request(
         "recording_id": validate_recording_id(
             payload["recording_id"]
         ),
-  }
+    }
+
+
+# ============================================================
+# FAILED RECORDING REQUEST
+# ============================================================
+
+def validate_failed_recording_request(
+    data: Any,
+) -> dict[str, str]:
+    """
+    Validate a request to mark a recording as failed.
+
+    The reason is optional. The service layer still applies
+    its own defensive validation.
+    """
+
+    payload = require_dict(
+        data
+    )
+
+    reject_unknown_fields(
+        payload,
+        FAILED_RECORDING_FIELDS,
+    )
+
+    required_fields = {
+        "session_id",
+        "recording_id",
+    }
+
+    missing_fields = (
+        required_fields - set(payload)
+    )
+
+    if missing_fields:
+        raise ValueError(
+            "Missing required field(s): "
+            + ", ".join(
+                sorted(missing_fields)
+            )
+            + "."
+        )
+
+    reason = payload.get(
+        "reason",
+        "Recording operation failed.",
+    )
+
+    if not isinstance(
+        reason,
+        str,
+    ):
+        raise ValueError(
+            "reason must be a string."
+        )
+
+    reason = reason.strip()
+
+    if not reason:
+        reason = (
+            "Recording operation failed."
+        )
+
+    if len(reason) > MAX_FAILURE_REASON_LENGTH:
+        raise ValueError(
+            "reason is too long."
+        )
+
+    return {
+        "session_id": validate_session_id(
+            payload["session_id"]
+        ),
+        "recording_id": validate_recording_id(
+            payload["recording_id"]
+        ),
+        "reason": reason,
+    }
