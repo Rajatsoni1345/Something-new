@@ -4,6 +4,7 @@ Birthday Quest - Quest Routes
 HTTP API endpoints for reading and progressing quest state.
 
 Routes remain intentionally thin:
+
 HTTP request
     -> schema validation
     -> session lookup
@@ -25,7 +26,6 @@ from schemas.quest import (
 from services.quest_service import (
     collect_item,
     complete_level,
-    create_quest,
     discover_word,
     get_or_create_quest,
     get_quest,
@@ -108,6 +108,9 @@ def complete_level_route():
     """
     Complete one validated quest level.
 
+    The submitted answer is passed to the service layer,
+    where the authoritative server-side answer is checked.
+
     POST /api/v1/quest/levels/complete
     """
 
@@ -143,13 +146,11 @@ def complete_level_route():
                 message="Quest not found for this session."
             )
 
-        # The actual answer verification will be handled by the
-        # quest service/content configuration. This route never
-        # changes quest state directly.
         quest = complete_level(
             session=session,
             quest=quest,
             level=validated["level"],
+            answer=validated["answer"],
         )
 
         return success_response(
@@ -236,6 +237,8 @@ def collect_item_route():
 def discover_word_route():
     """
     Submit a discovered hidden word.
+
+    The actual word is validated by the quest service.
 
     POST /api/v1/quest/words/discover
     """
