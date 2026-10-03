@@ -13,6 +13,7 @@ from flask import Flask, jsonify
 
 from config import get_config
 from extensions import init_extensions
+from routes.health import health_bp
 
 
 # ------------------------------------------------------------
@@ -78,8 +79,7 @@ def register_security_headers(app: Flask) -> None:
         if not app.debug:
             response.headers.setdefault(
                 "Strict-Transport-Security",
-                "max-age=31536000; "
-                "includeSubDomains",
+                "max-age=31536000; includeSubDomains",
             )
 
         return response
@@ -146,6 +146,24 @@ def register_error_handlers(app: Flask) -> None:
 
 
 # ------------------------------------------------------------
+# BLUEPRINTS
+# ------------------------------------------------------------
+
+def register_blueprints(app: Flask) -> None:
+    """Register all application blueprints."""
+
+    api_prefix = app.config.get(
+        "API_PREFIX",
+        "/api/v1",
+    )
+
+    app.register_blueprint(
+        health_bp,
+        url_prefix=f"{api_prefix}/health",
+    )
+
+
+# ------------------------------------------------------------
 # APPLICATION FACTORY
 # ------------------------------------------------------------
 
@@ -168,7 +186,9 @@ def create_app() -> Flask:
     # BASIC FLASK SETTINGS
     # --------------------------------------------------------
 
-    app.config["MAX_CONTENT_LENGTH"] = config_class.MAX_CONTENT_LENGTH
+    app.config["MAX_CONTENT_LENGTH"] = (
+        config_class.MAX_CONTENT_LENGTH
+    )
 
     # --------------------------------------------------------
     # LOGGING
@@ -193,6 +213,12 @@ def create_app() -> Flask:
     # --------------------------------------------------------
 
     register_error_handlers(app)
+
+    # --------------------------------------------------------
+    # ROUTES
+    # --------------------------------------------------------
+
+    register_blueprints(app)
 
     # --------------------------------------------------------
     # APPLICATION STARTUP LOG
@@ -230,5 +256,8 @@ if __name__ == "__main__":
     app.run(
         host=host,
         port=port,
-        debug=app.config.get("DEBUG", False),
-  )
+        debug=app.config.get(
+            "DEBUG",
+            False,
+        ),
+    )
