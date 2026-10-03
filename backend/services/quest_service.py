@@ -703,10 +703,26 @@ def discover_word(
     word: str,
 ) -> Quest:
     """
-    Register one of the four hidden words.
+    Validate and record the next hidden quest word.
 
-    The actual expected word is intentionally kept server-side.
+    The client cannot invent arbitrary hidden words. The backend
+    determines which hidden word is expected next.
     """
+    if not isinstance(session, Session):
+        raise TypeError(
+            "session must be a Session instance."
+        )
+
+    if not isinstance(quest, Quest):
+        raise TypeError(
+            "quest must be a Quest instance."
+        )
+
+    if quest.session_id != session.session_id:
+        raise ValueError(
+            "Session and quest do not belong together."
+        )
+
     if not isinstance(word, str):
         raise TypeError(
             "word must be a string."
@@ -719,11 +735,67 @@ def discover_word(
             "word cannot be empty."
         )
 
+    discovered_count = len(
+        quest.discovered_words
+    )
+
+    if discovered_count >= 4:
+        raise ValueError(
+            "All hidden words have already been discovered."
+        )
+
+    expected_word = LEVEL_HIDDEN_WORDS.get(
+        discovered_count + 1
+    )
+
+    if expected_word is None:
+        raise ValueError(
+            "No hidden word is configured for this progression step."
+        )
+
+    expected_word = expected_word.casefold()
+
+    if normalized_word != expected_word:
+        raise ValueError(
+            "The submitted hidden word is not valid."
+        )
+
     if normalized_word in {
         item.casefold()
         for item in quest.discovered_words
     }:
         return quest
+
+    discovered_words = list(
+        quest.discovered_words
+    )
+
+    discovered_words.append(
+        normalized_word
+    )
+
+    next_version = quest.version + 1
+
+    update_document_data(
+        QUESTS_COLLECTION,
+        quest.session_id,
+        {
+            "discovered_words": discovered_words,
+            "version": next_version,
+        },
+    )
+
+    quest.discovered_words = discovered_words
+    quest.version = next_version
+
+    log_info(
+        logger,
+        "hidden_word_discovered",
+        session_id=session.session_id,
+        word_index=discovered_count + 1,
+    )
+
+    return quest
 
     if len(quest.discovered_words) >= 4:
         raise ValueError(
