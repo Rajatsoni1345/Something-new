@@ -4,28 +4,25 @@ Birthday Quest - Session Service
 Business logic for creating, recovering, reading, updating, and
 completing Birthday Quest sessions.
 
-IMPORTANT:
-- Session persistence is handled through Firebase/Firestore.
-- Version updates use Firestore transactions where a read-modify-
-  write operation is required.
-- Session state is never accepted directly from the client.
-- Routes must use this service instead of manipulating Firestore
-  directly.
+Storage architecture:
+- Firebase Firestore -> session/state/metadata
+- Cloudinary -> recorded videos and permanent media
+- Render filesystem -> NEVER used for permanent recordings
+
+This service only handles session data. It does not upload or
+store video files.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from google.cloud import firestore
-
 from models.session import Session
 
 from services.firebase_service import (
+    get_firestore_client,
     get_document,
     get_document_data,
-    get_firestore_client,
-    set_document_data,
 )
 
 from utils.ids import generate_session_id
@@ -112,12 +109,25 @@ def _validate_new_state(
     return new_state
 
 
+def _get_session_document(
+    session_id: str,
+):
+    """
+    Return the Firestore document reference for a session.
+    """
+
+    return get_document(
+        SESSIONS_COLLECTION,
+        session_id,
+    )
+
+
 def _get_transaction():
     """
-    Create a new Firestore transaction.
+    Create a fresh Firestore transaction.
 
-    A fresh transaction is intentionally created for each atomic
-    read-modify-write operation.
+    The transaction is used only for atomic session
+    read-modify-write operations.
     """
 
     client = get_firestore_client()
@@ -137,7 +147,8 @@ def create_session(
 
     A UUID v4 session ID is generated server-side.
 
-    The initial session is persisted before being returned.
+    The document is created transactionally so an existing
+    document can never be silently overwritten.
     """
 
     if metadata is None:
@@ -167,24 +178,14 @@ def create_session(
         metadata=dict(metadata),
     )
 
-    document = get_document(
-        SESSIONS_COLLECTION,
-        session.session_id,
+    document = _get_session_document(
+        session.session_id
     )
-
-    # --------------------------------------------------------
-    # Collision protection
-    # --------------------------------------------------------
-    #
-    # UUID v4 collision is extraordinarily unlikely, but the
-    # write still uses a transaction so that an already-existing
-    # document can never silently be overwritten.
-    #
 
     transaction = _get_transaction()
 
-    snapshot = document.get(
-        transaction=transaction
+    snapshot = transaction.get(
+        document
     )
 
     if snapshot.exists:
@@ -193,7 +194,7 @@ def create_session(
             "Please retry session creation."
         )
 
-    transaction.set(
+    transaction.create(
         document,
         session.to_dict(),
     )
@@ -218,7 +219,7 @@ def get_session(
     session_id: str,
 ) -> Session | None:
     """
-    Retrieve a session by its ID.
+    Retrieve a session by ID.
 
     Returns None when the session does not exist.
     """
@@ -251,15 +252,14 @@ def recover_session(
     A completed or inactive session cannot be recovered.
     """
 
-    document = get_document(
-        SESSIONS_COLLECTION,
-        session_id,
+    document = _get_session_document(
+        session_id
     )
 
     transaction = _get_transaction()
 
-    snapshot = document.get(
-        transaction=transaction
+    snapshot = transaction.get(
+        document
     )
 
     if not snapshot.exists:
@@ -339,12 +339,11 @@ def update_session_activity(
     session: Session,
 ) -> Session:
     """
-    Atomically update the session's activity timestamp and
-    increment its version.
+    Atomically update session activity and increment its version.
 
-    The persisted version must match the version supplied by the
-    caller. This prevents stale session objects from silently
-    overwriting newer session data.
+    The persisted version must match the supplied Session version.
+    This prevents a stale session object from overwriting newer
+    session data.
     """
 
     _validate_session(
@@ -361,15 +360,14 @@ def update_session_activity(
             "Cannot update activity for a completed session."
         )
 
-    document = get_document(
-        SESSIONS_COLLECTION,
-        session.session_id,
+    document = _get_session_document(
+        session.session_id
     )
 
     transaction = _get_transaction()
 
-    snapshot = document.get(
-        transaction=transaction
+    snapshot = transaction.get(
+        document
     )
 
     if not snapshot.exists:
@@ -440,10 +438,9 @@ def update_session_state(
     """
     Atomically change the session state.
 
-    The persisted version must match the supplied Session object.
-
-    This method does NOT decide whether the transition itself is
-    legal. Quest progression rules belong to quest_service.py.
+    This function does not decide whether the requested state
+    transition is legal. Quest progression rules belong to
+    quest_service.py.
     """
 
     _validate_session(
@@ -464,15 +461,14 @@ def update_session_state(
             "A completed session cannot change state."
         )
 
-    document = get_document(
-        SESSIONS_COLLECTION,
-        session.session_id,
+    document = _get_session_document(
+        session.session_id
     )
 
     transaction = _get_transaction()
 
-    snapshot = document.get(
-        transaction=transaction
+    snapshot = transaction.get(
+        document
     )
 
     if not snapshot.exists:
@@ -544,8 +540,8 @@ def complete_session(
     """
     Atomically mark a session as complete and inactive.
 
-    Calling this method on an already completed session simply
-    returns the supplied session object.
+    Calling this function on an already completed session is
+    idempotent and returns the supplied session.
     """
 
     _validate_session(
@@ -560,15 +556,14 @@ def complete_session(
             "Session is already inactive."
         )
 
-    document = get_document(
-        SESSIONS_COLLECTION,
-        session.session_id,
+    document = _get_session_document(
+        session.session_id
     )
 
     transaction = _get_transaction()
 
-    snapshot = document.get(
-        transaction=transaction
+    snapshot = transaction.get(
+        document
     )
 
     if not snapshot.exists:
@@ -597,9 +592,7 @@ def complete_session(
         )
 
     if persisted_session.state == COMPLETED_SESSION_STATE:
-        return Session.from_dict(
-            data
-        )
+        return persisted_session
 
     if not persisted_session.active:
         raise ValueError(
