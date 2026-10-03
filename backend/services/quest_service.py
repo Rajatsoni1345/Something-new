@@ -1,4 +1,4 @@
-"""
+  """
 Birthday Quest - Quest Service
 
 Centralized quest state machine and progression logic.
@@ -14,8 +14,10 @@ IMPORTANT:
 - Normal quest levels are strictly 1 through 4.
 - Level answers are validated server-side.
 - Hidden words are validated server-side.
-- Quest/session state changes are performed transactionally
-  whenever both documents must change together.
+- Quest/session state changes are performed transactionally.
+- Quest creation is transaction-safe.
+- Optimistic version checks prevent stale writes.
+- SESSION_COMPLETE permanently deactivates the session.
 - This service does not handle video uploads.
 """
 
@@ -29,8 +31,7 @@ from models.session import Session
 from services.firebase_service import (
     get_document,
     get_document_data,
-    get_firestore_client,
-    set_document_data,
+    run_transaction,
 )
 
 from utils.logging import (
@@ -111,7 +112,12 @@ LEVEL_STATES = {
 }
 
 NORMAL_LEVELS = frozenset(
-    {1, 2, 3, 4}
+    {
+        1,
+        2,
+        3,
+        4,
+    }
 )
 
 
@@ -451,6 +457,10 @@ def _normalize_word(
     return normalized
 
 
+# ============================================================
+# FIRESTORE REFERENCES
+# ============================================================
+
 def _get_quest_document(
     session_id: str,
 ):
@@ -477,24 +487,19 @@ def _get_session_document(
     )
 
 
-def _create_transaction():
-    """
-    Create a Firestore transaction.
-    """
-
-    return get_firestore_client().transaction()
-
+# ============================================================
+# TRANSACTION HELPERS
+# ============================================================
 
 def _read_transaction_documents(
     transaction,
     session_id: str,
 ):
     """
-    Read both the quest and session documents inside the same
-    transaction.
+    Read both quest and session documents inside the same
+    Firestore transaction.
 
-    Returns:
-        session_snapshot, quest_snapshot
+    All reads happen before transaction writes.
     """
 
     session_document = _get_session_document(
@@ -528,6 +533,7 @@ def _load_transaction_state(
     transaction.
 
     Returns:
+
         transaction,
         session_document,
         quest_document,
@@ -553,8 +559,13 @@ def _load_transaction_state(
             "Quest no longer exists for this session."
         )
 
-    session_data = session_snapshot.to_dict()
-    quest_data = quest_snapshot.to_dict()
+    session_data = (
+        session_snapshot.to_dict()
+    )
+
+    quest_data = (
+        quest_snapshot.to_dict()
+    )
 
     if not isinstance(
         session_data,
@@ -631,30 +642,56 @@ def _validate_expected_versions(
         )
 
 
-def _commit_quest_and_session(
-    transaction,
-    session_document,
-    quest_document,
-    session: Session,
-    quest: Quest,
-    *,
-    update_session: bool = True,
+def _copy_session_values(
+    target: Session,
+    source: Session,
 ) -> None:
     """
-    Persist quest and, when requested, session changes in one
-    Firestore transaction.
+    Synchronize a caller's Session model with the persisted
+    transaction result.
     """
 
-    transaction.update(
-        quest_document,
-        quest.to_dict(),
-    )
+    target.state = source.state
+    target.updated_at = source.updated_at
+    target.last_activity_at = source.last_activity_at
+    target.completed_at = source.completed_at
+    target.version = source.version
+    target.active = source.active
 
-    if update_session:
-        transaction.update(
-            session_document,
-            session.to_dict(),
-        )
+
+def _copy_quest_values(
+    target: Quest,
+    source: Quest,
+) -> None:
+    """
+    Synchronize a caller's Quest model with the persisted
+    transaction result.
+    """
+
+    target.state = source.state
+    target.current_level = source.current_level
+    target.completed_levels = list(
+        source.completed_levels
+    )
+    target.collected_items = list(
+        source.collected_items
+    )
+    target.discovered_words = list(
+        source.discovered_words
+    )
+    target.collected_ticket = (
+        source.collected_ticket
+    )
+    target.train_completed = (
+        source.train_completed
+    )
+    target.final_reveal_unlocked = (
+        source.final_reveal_unlocked
+    )
+    target.version = source.version
+    target.metadata = dict(
+        source.metadata
+    )
 
 
 # ============================================================
@@ -667,19 +704,20 @@ def create_quest(
     """
     Create a new quest for a session.
 
-    If a quest already exists, return the existing quest.
+    Creation is transaction-safe.
+
+    If another request creates the quest between the initial
+    request and transaction execution, the already-created
+    quest is returned instead of overwriting it.
     """
 
     _validate_session(
         session
     )
 
-    existing = get_quest(
+    quest_document = _get_quest_document(
         session.session_id
     )
-
-    if existing is not None:
-        return existing
 
     quest = Quest(
         session_id=session.session_id,
@@ -695,20 +733,58 @@ def create_quest(
         metadata={},
     )
 
-    set_document_data(
-        QUESTS_COLLECTION,
-        session.session_id,
-        quest.to_dict(),
+    def create_operation(
+        transaction,
+    ):
+        snapshot = transaction.get(
+            quest_document
+        )
+
+        if snapshot.exists:
+            existing_data = (
+                snapshot.to_dict()
+            )
+
+            if not isinstance(
+                existing_data,
+                dict,
+            ):
+                raise RuntimeError(
+                    "Stored quest data is invalid."
+                )
+
+            return Quest.from_dict(
+                existing_data
+            )
+
+        transaction.create(
+            quest_document,
+            quest.to_dict(),
+        )
+
+        return quest
+
+    result = run_transaction(
+        create_operation
     )
+
+    if result is not quest:
+        log_info(
+            logger,
+            "quest_already_exists",
+            session_id=session.session_id,
+            state=result.state,
+        )
+        return result
 
     log_info(
         logger,
         "quest_created",
         session_id=session.session_id,
-        state=quest.state,
+        state=result.state,
     )
 
-    return quest
+    return result
 
 
 # ============================================================
@@ -740,6 +816,9 @@ def get_or_create_quest(
 ) -> Quest:
     """
     Return an existing quest or create one.
+
+    The creation path itself is transaction-safe, so concurrent
+    callers cannot overwrite one another's quest.
     """
 
     _validate_session(
@@ -751,6 +830,10 @@ def get_or_create_quest(
     )
 
     if existing is not None:
+        _validate_quest(
+            session,
+            existing,
+        )
         return existing
 
     return create_quest(
@@ -802,8 +885,13 @@ def transition_quest(
     """
     Perform one validated quest state transition.
 
-    Quest and session state/version changes are committed
-    transactionally.
+    Quest and session changes are committed atomically.
+
+    SESSION_COMPLETE is special:
+    - quest state becomes SESSION_COMPLETE
+    - session state becomes SESSION_COMPLETE
+    - session becomes inactive
+    - completed_at is written
     """
 
     _validate_session(
@@ -815,15 +903,6 @@ def transition_quest(
         quest,
     )
 
-    next_state = (
-        next_state.strip()
-        if isinstance(
-            next_state,
-            str,
-        )
-        else next_state
-    )
-
     if not isinstance(
         next_state,
         str,
@@ -832,9 +911,16 @@ def transition_quest(
             "next_state must be a string."
         )
 
+    next_state = next_state.strip()
+
     if not next_state:
         raise ValueError(
             "next_state cannot be empty."
+        )
+
+    if len(next_state) > 128:
+        raise ValueError(
+            "next_state cannot exceed 128 characters."
         )
 
     if not can_transition(
@@ -854,73 +940,109 @@ def transition_quest(
             f"{quest.state} -> {next_state}"
         )
 
-    transaction = _create_transaction()
+    requested_previous_state = (
+        quest.state
+    )
+
+    def transition_operation(
+        transaction,
+    ):
+        (
+            transaction,
+            session_document,
+            quest_document,
+            stored_session,
+            stored_quest,
+        ) = _load_transaction_state(
+            transaction,
+            session.session_id,
+        )
+
+        _validate_expected_versions(
+            session,
+            quest,
+            stored_session,
+            stored_quest,
+        )
+
+        if (
+            stored_quest.state
+            != quest.state
+        ):
+            raise RuntimeError(
+                "Quest state conflict. "
+                "The quest was modified by another request."
+            )
+
+        if (
+            stored_session.state
+            != session.state
+        ):
+            raise RuntimeError(
+                "Session state conflict. "
+                "The session was modified by another request."
+            )
+
+        if not can_transition(
+            stored_quest.state,
+            next_state,
+        ):
+            raise ValueError(
+                f"Invalid quest transition: "
+                f"{stored_quest.state} -> {next_state}"
+            )
+
+        now = utc_now_iso()
+
+        stored_quest.state = next_state
+        stored_quest.version += 1
+
+        stored_session.state = next_state
+        stored_session.updated_at = now
+        stored_session.last_activity_at = now
+        stored_session.version += 1
+
+        if next_state == STATE_SESSION_COMPLETE:
+            stored_session.active = False
+            stored_session.completed_at = now
+
+        transaction.update(
+            quest_document,
+            stored_quest.to_dict(),
+        )
+
+        transaction.update(
+            session_document,
+            stored_session.to_dict(),
+        )
+
+        return (
+            stored_session,
+            stored_quest,
+        )
 
     (
-        transaction,
-        session_document,
-        quest_document,
-        stored_session,
-        stored_quest,
-    ) = _load_transaction_state(
-        transaction,
-        session.session_id,
+        updated_session,
+        updated_quest,
+    ) = run_transaction(
+        transition_operation
     )
 
-    _validate_expected_versions(
+    _copy_session_values(
         session,
+        updated_session,
+    )
+
+    _copy_quest_values(
         quest,
-        stored_session,
-        stored_quest,
+        updated_quest,
     )
-
-    if stored_quest.state != quest.state:
-        raise RuntimeError(
-            "Quest state conflict. "
-            "The quest was modified by another request."
-        )
-
-    if stored_session.state != session.state:
-        raise RuntimeError(
-            "Session state conflict. "
-            "The session was modified by another request."
-        )
-
-    now = utc_now_iso()
-
-    stored_quest.state = next_state
-    stored_quest.version += 1
-
-    stored_session.state = next_state
-    stored_session.updated_at = now
-    stored_session.last_activity_at = now
-    stored_session.version += 1
-
-    transaction.update(
-        quest_document,
-        stored_quest.to_dict(),
-    )
-
-    transaction.update(
-        session_document,
-        stored_session.to_dict(),
-    )
-
-    transaction.commit()
-
-    quest.state = stored_quest.state
-    quest.version = stored_quest.version
-
-    session.state = stored_session.state
-    session.updated_at = stored_session.updated_at
-    session.last_activity_at = stored_session.last_activity_at
-    session.version = stored_session.version
 
     log_info(
         logger,
         "quest_transition",
         session_id=session.session_id,
-        previous_state=quest.state,
+        previous_state=requested_previous_state,
         next_state=next_state,
     )
 
@@ -955,14 +1077,8 @@ def complete_level(
     )
 
     if (
-        isinstance(
-            level,
-            bool,
-        )
-        or not isinstance(
-            level,
-            int,
-        )
+        isinstance(level, bool)
+        or not isinstance(level, int)
     ):
         raise TypeError(
             "level must be an integer."
@@ -1028,102 +1144,113 @@ def complete_level(
             f"completion of level {level}."
         )
 
-    transaction = _create_transaction()
+    def level_operation(
+        transaction,
+    ):
+        (
+            transaction,
+            session_document,
+            quest_document,
+            stored_session,
+            stored_quest,
+        ) = _load_transaction_state(
+            transaction,
+            session.session_id,
+        )
+
+        _validate_expected_versions(
+            session,
+            quest,
+            stored_session,
+            stored_quest,
+        )
+
+        if (
+            stored_quest.current_level
+            != expected_current_level
+        ):
+            raise ValueError(
+                "This level is not currently available."
+            )
+
+        if level in stored_quest.completed_levels:
+            raise ValueError(
+                "This level has already been completed."
+            )
+
+        if not can_transition(
+            stored_quest.state,
+            next_state,
+        ):
+            raise ValueError(
+                f"Quest state does not allow "
+                f"completion of level {level}."
+            )
+
+        completed_levels = list(
+            stored_quest.completed_levels
+        )
+
+        completed_levels.append(
+            level
+        )
+
+        completed_levels = sorted(
+            set(completed_levels)
+        )
+
+        now = utc_now_iso()
+
+        stored_quest.state = next_state
+        stored_quest.current_level = level
+        stored_quest.completed_levels = (
+            completed_levels
+        )
+        stored_quest.version += 1
+
+        stored_session.state = next_state
+        stored_session.updated_at = now
+        stored_session.last_activity_at = now
+        stored_session.version += 1
+
+        transaction.update(
+            quest_document,
+            stored_quest.to_dict(),
+        )
+
+        transaction.update(
+            session_document,
+            stored_session.to_dict(),
+        )
+
+        return (
+            stored_session,
+            stored_quest,
+        )
 
     (
-        transaction,
-        session_document,
-        quest_document,
-        stored_session,
-        stored_quest,
-    ) = _load_transaction_state(
-        transaction,
-        session.session_id,
+        updated_session,
+        updated_quest,
+    ) = run_transaction(
+        level_operation
     )
 
-    _validate_expected_versions(
+    _copy_session_values(
         session,
+        updated_session,
+    )
+
+    _copy_quest_values(
         quest,
-        stored_session,
-        stored_quest,
+        updated_quest,
     )
-
-    if (
-        stored_quest.current_level
-        != expected_current_level
-    ):
-        raise ValueError(
-            "This level is not currently available."
-        )
-
-    if level in stored_quest.completed_levels:
-        raise ValueError(
-            "This level has already been completed."
-        )
-
-    if not can_transition(
-        stored_quest.state,
-        next_state,
-    ):
-        raise ValueError(
-            f"Quest state does not allow "
-            f"completion of level {level}."
-        )
-
-    completed_levels = list(
-        stored_quest.completed_levels
-    )
-
-    completed_levels.append(
-        level
-    )
-
-    completed_levels = sorted(
-        set(completed_levels)
-    )
-
-    now = utc_now_iso()
-
-    stored_quest.state = next_state
-    stored_quest.current_level = level
-    stored_quest.completed_levels = completed_levels
-    stored_quest.version += 1
-
-    stored_session.state = next_state
-    stored_session.updated_at = now
-    stored_session.last_activity_at = now
-    stored_session.version += 1
-
-    transaction.update(
-        quest_document,
-        stored_quest.to_dict(),
-    )
-
-    transaction.update(
-        session_document,
-        stored_session.to_dict(),
-    )
-
-    transaction.commit()
-
-    quest.state = stored_quest.state
-    quest.current_level = stored_quest.current_level
-    quest.completed_levels = list(
-        stored_quest.completed_levels
-    )
-    quest.version = stored_quest.version
-
-    session.state = stored_session.state
-    session.updated_at = stored_session.updated_at
-    session.last_activity_at = stored_session.last_activity_at
-    session.version = stored_session.version
 
     log_info(
         logger,
         "level_completed",
         session_id=session.session_id,
         level=level,
-        state=next_state,
+        state=quest.state,
     )
 
     return quest
@@ -1179,91 +1306,103 @@ def collect_item(
             "Unknown quest item."
         )
 
-    if item_id in quest.collected_items:
-        return quest
-
-    transaction = _create_transaction()
-
-    (
+    def item_operation(
         transaction,
-        session_document,
-        quest_document,
-        stored_session,
-        stored_quest,
-    ) = _load_transaction_state(
-        transaction,
-        session.session_id,
-    )
-
-    _validate_expected_versions(
-        session,
-        quest,
-        stored_session,
-        stored_quest,
-    )
-
-    if stored_quest.state != STATE_WALL_UNLOCKED:
-        raise ValueError(
-            "Collectibles are not currently available."
+    ):
+        (
+            transaction,
+            session_document,
+            quest_document,
+            stored_session,
+            stored_quest,
+        ) = _load_transaction_state(
+            transaction,
+            session.session_id,
         )
 
-    if item_id in stored_quest.collected_items:
-        return stored_quest
+        _validate_expected_versions(
+            session,
+            quest,
+            stored_session,
+            stored_quest,
+        )
 
-    collected_items = list(
-        stored_quest.collected_items
-    )
+        if stored_quest.state != STATE_WALL_UNLOCKED:
+            raise ValueError(
+                "Collectibles are not currently available."
+            )
 
-    collected_items.append(
-        item_id
-    )
+        if item_id in stored_quest.collected_items:
+            return (
+                stored_session,
+                stored_quest,
+            )
 
-    collected_items = sorted(
-        set(collected_items)
-    )
+        collected_items = list(
+            stored_quest.collected_items
+        )
 
-    if ALLOWED_ITEMS.issubset(
-        set(collected_items)
-    ):
-        next_state = STATE_COLLECTIBLES_COMPLETE
-    else:
-        next_state = STATE_WALL_UNLOCKED
+        collected_items.append(
+            item_id
+        )
 
-    now = utc_now_iso()
+        collected_items = sorted(
+            set(collected_items)
+        )
 
-    stored_quest.collected_items = collected_items
-    stored_quest.state = next_state
-    stored_quest.version += 1
+        if ALLOWED_ITEMS.issubset(
+            set(collected_items)
+        ):
+            next_state = (
+                STATE_COLLECTIBLES_COMPLETE
+            )
+        else:
+            next_state = STATE_WALL_UNLOCKED
 
-    transaction.update(
-        quest_document,
-        stored_quest.to_dict(),
-    )
+        now = utc_now_iso()
 
-    if next_state != stored_session.state:
+        stored_quest.collected_items = (
+            collected_items
+        )
+        stored_quest.state = next_state
+        stored_quest.version += 1
+
         stored_session.state = next_state
+        stored_session.updated_at = now
+        stored_session.last_activity_at = now
+        stored_session.version += 1
 
-    stored_session.updated_at = now
-    stored_session.last_activity_at = now
-    stored_session.version += 1
+        transaction.update(
+            quest_document,
+            stored_quest.to_dict(),
+        )
 
-    transaction.update(
-        session_document,
-        stored_session.to_dict(),
+        transaction.update(
+            session_document,
+            stored_session.to_dict(),
+        )
+
+        return (
+            stored_session,
+            stored_quest,
+        )
+
+    (
+        updated_session,
+        updated_quest,
+    ) = run_transaction(
+        item_operation
     )
 
-    transaction.commit()
-
-    quest.collected_items = list(
-        stored_quest.collected_items
+    _copy_session_values(
+        session,
+        updated_session,
     )
-    quest.state = stored_quest.state
-    quest.version = stored_quest.version
 
-    session.state = stored_session.state
-    session.updated_at = stored_session.updated_at
-    session.last_activity_at = stored_session.last_activity_at
-    session.version = stored_session.version
+    _copy_quest_values(
+        quest,
+        updated_quest,
+    )
 
     log_info(
         logger,
@@ -1271,7 +1410,7 @@ def collect_item(
         session_id=session.session_id,
         item_id=item_id,
         items_collected=len(
-            collected_items
+            quest.collected_items
         ),
     )
 
@@ -1305,69 +1444,80 @@ def collect_ticket(
             "The railway ticket is not currently available."
         )
 
-    if quest.collected_ticket:
-        return quest
-
-    transaction = _create_transaction()
-
-    (
+    def ticket_operation(
         transaction,
-        session_document,
-        quest_document,
-        stored_session,
-        stored_quest,
-    ) = _load_transaction_state(
-        transaction,
-        session.session_id,
-    )
-
-    _validate_expected_versions(
-        session,
-        quest,
-        stored_session,
-        stored_quest,
-    )
-
-    if stored_quest.state != STATE_COLLECTIBLES_COMPLETE:
-        raise ValueError(
-            "The railway ticket is not currently available."
+    ):
+        (
+            transaction,
+            session_document,
+            quest_document,
+            stored_session,
+            stored_quest,
+        ) = _load_transaction_state(
+            transaction,
+            session.session_id,
         )
 
-    if stored_quest.collected_ticket:
-        return stored_quest
+        _validate_expected_versions(
+            session,
+            quest,
+            stored_session,
+            stored_quest,
+        )
 
-    next_state = STATE_TICKET_COLLECTED
-    now = utc_now_iso()
+        if stored_quest.state != STATE_COLLECTIBLES_COMPLETE:
+            raise ValueError(
+                "The railway ticket is not currently available."
+            )
 
-    stored_quest.collected_ticket = True
-    stored_quest.state = next_state
-    stored_quest.version += 1
+        if stored_quest.collected_ticket:
+            return (
+                stored_session,
+                stored_quest,
+            )
 
-    stored_session.state = next_state
-    stored_session.updated_at = now
-    stored_session.last_activity_at = now
-    stored_session.version += 1
+        now = utc_now_iso()
 
-    transaction.update(
-        quest_document,
-        stored_quest.to_dict(),
+        stored_quest.collected_ticket = True
+        stored_quest.state = STATE_TICKET_COLLECTED
+        stored_quest.version += 1
+
+        stored_session.state = STATE_TICKET_COLLECTED
+        stored_session.updated_at = now
+        stored_session.last_activity_at = now
+        stored_session.version += 1
+
+        transaction.update(
+            quest_document,
+            stored_quest.to_dict(),
+        )
+
+        transaction.update(
+            session_document,
+            stored_session.to_dict(),
+        )
+
+        return (
+            stored_session,
+            stored_quest,
+        )
+
+    (
+        updated_session,
+        updated_quest,
+    ) = run_transaction(
+        ticket_operation
     )
 
-    transaction.update(
-        session_document,
-        stored_session.to_dict(),
+    _copy_session_values(
+        session,
+        updated_session,
     )
 
-    transaction.commit()
-
-    quest.collected_ticket = stored_quest.collected_ticket
-    quest.state = stored_quest.state
-    quest.version = stored_quest.version
-
-    session.state = stored_session.state
-    session.updated_at = stored_session.updated_at
-    session.last_activity_at = stored_session.last_activity_at
-    session.version = stored_session.version
+    _copy_quest_values(
+        quest,
+        updated_quest,
+    )
 
     log_info(
         logger,
@@ -1404,69 +1554,80 @@ def complete_train(
             "The train sequence is not currently available."
         )
 
-    if quest.train_completed:
-        return quest
-
-    transaction = _create_transaction()
-
-    (
+    def train_operation(
         transaction,
-        session_document,
-        quest_document,
-        stored_session,
-        stored_quest,
-    ) = _load_transaction_state(
-        transaction,
-        session.session_id,
-    )
-
-    _validate_expected_versions(
-        session,
-        quest,
-        stored_session,
-        stored_quest,
-    )
-
-    if stored_quest.state != STATE_TICKET_COLLECTED:
-        raise ValueError(
-            "The train sequence is not currently available."
+    ):
+        (
+            transaction,
+            session_document,
+            quest_document,
+            stored_session,
+            stored_quest,
+        ) = _load_transaction_state(
+            transaction,
+            session.session_id,
         )
 
-    if stored_quest.train_completed:
-        return stored_quest
+        _validate_expected_versions(
+            session,
+            quest,
+            stored_session,
+            stored_quest,
+        )
 
-    next_state = STATE_TRAIN_COMPLETE
-    now = utc_now_iso()
+        if stored_quest.state != STATE_TICKET_COLLECTED:
+            raise ValueError(
+                "The train sequence is not currently available."
+            )
 
-    stored_quest.train_completed = True
-    stored_quest.state = next_state
-    stored_quest.version += 1
+        if stored_quest.train_completed:
+            return (
+                stored_session,
+                stored_quest,
+            )
 
-    stored_session.state = next_state
-    stored_session.updated_at = now
-    stored_session.last_activity_at = now
-    stored_session.version += 1
+        now = utc_now_iso()
 
-    transaction.update(
-        quest_document,
-        stored_quest.to_dict(),
+        stored_quest.train_completed = True
+        stored_quest.state = STATE_TRAIN_COMPLETE
+        stored_quest.version += 1
+
+        stored_session.state = STATE_TRAIN_COMPLETE
+        stored_session.updated_at = now
+        stored_session.last_activity_at = now
+        stored_session.version += 1
+
+        transaction.update(
+            quest_document,
+            stored_quest.to_dict(),
+        )
+
+        transaction.update(
+            session_document,
+            stored_session.to_dict(),
+        )
+
+        return (
+            stored_session,
+            stored_quest,
+        )
+
+    (
+        updated_session,
+        updated_quest,
+    ) = run_transaction(
+        train_operation
     )
 
-    transaction.update(
-        session_document,
-        stored_session.to_dict(),
+    _copy_session_values(
+        session,
+        updated_session,
     )
 
-    transaction.commit()
-
-    quest.train_completed = stored_quest.train_completed
-    quest.state = stored_quest.state
-    quest.version = stored_quest.version
-
-    session.state = stored_session.state
-    session.updated_at = stored_session.updated_at
-    session.last_activity_at = stored_session.last_activity_at
-    session.version = stored_session.version
+    _copy_quest_values(
+        quest,
+        updated_quest,
+    )
 
     log_info(
         logger,
@@ -1507,68 +1668,81 @@ def complete_sorting(
 
     next_state = STATE_SORTING_COMPLETE
 
-    if not can_transition(
-        quest.state,
-        next_state,
+    def sorting_operation(
+        transaction,
     ):
-        raise ValueError(
-            "Sorting cannot be completed from the current state."
+        (
+            transaction,
+            session_document,
+            quest_document,
+            stored_session,
+            stored_quest,
+        ) = _load_transaction_state(
+            transaction,
+            session.session_id,
         )
 
-    transaction = _create_transaction()
+        _validate_expected_versions(
+            session,
+            quest,
+            stored_session,
+            stored_quest,
+        )
+
+        if stored_quest.state != STATE_TRAIN_COMPLETE:
+            raise ValueError(
+                "Sorting is not currently available."
+            )
+
+        if not can_transition(
+            stored_quest.state,
+            next_state,
+        ):
+            raise ValueError(
+                "Sorting cannot be completed from the current state."
+            )
+
+        now = utc_now_iso()
+
+        stored_quest.state = next_state
+        stored_quest.version += 1
+
+        stored_session.state = next_state
+        stored_session.updated_at = now
+        stored_session.last_activity_at = now
+        stored_session.version += 1
+
+        transaction.update(
+            quest_document,
+            stored_quest.to_dict(),
+        )
+
+        transaction.update(
+            session_document,
+            stored_session.to_dict(),
+        )
+
+        return (
+            stored_session,
+            stored_quest,
+        )
 
     (
-        transaction,
-        session_document,
-        quest_document,
-        stored_session,
-        stored_quest,
-    ) = _load_transaction_state(
-        transaction,
-        session.session_id,
+        updated_session,
+        updated_quest,
+    ) = run_transaction(
+        sorting_operation
     )
 
-    _validate_expected_versions(
+    _copy_session_values(
         session,
+        updated_session,
+    )
+
+    _copy_quest_values(
         quest,
-        stored_session,
-        stored_quest,
+        updated_quest,
     )
-
-    if stored_quest.state != STATE_TRAIN_COMPLETE:
-        raise ValueError(
-            "Sorting is not currently available."
-        )
-
-    now = utc_now_iso()
-
-    stored_quest.state = next_state
-    stored_quest.version += 1
-
-    stored_session.state = next_state
-    stored_session.updated_at = now
-    stored_session.last_activity_at = now
-    stored_session.version += 1
-
-    transaction.update(
-        quest_document,
-        stored_quest.to_dict(),
-    )
-
-    transaction.update(
-        session_document,
-        stored_session.to_dict(),
-    )
-
-    transaction.commit()
-
-    quest.state = stored_quest.state
-    quest.version = stored_quest.version
-
-    session.state = stored_session.state
-    session.updated_at = stored_session.updated_at
-    session.last_activity_at = stored_session.last_activity_at
-    session.version = stored_session.version
 
     log_info(
         logger,
@@ -1594,6 +1768,7 @@ def discover_word(
     The client cannot invent arbitrary hidden words.
 
     Hidden words are stored in order:
+
         word 1 -> level 1
         word 2 -> level 2
         word 3 -> level 3
@@ -1631,9 +1806,10 @@ def discover_word(
             "No hidden word is configured for this progression step."
         )
 
-    expected_word = expected_word.casefold()
-
-    if normalized_word != expected_word:
+    if (
+        normalized_word
+        != expected_word.casefold()
+    ):
         log_warning(
             logger,
             "incorrect_hidden_word",
@@ -1645,107 +1821,124 @@ def discover_word(
             "The submitted hidden word is not valid."
         )
 
-    transaction = _create_transaction()
+    def word_operation(
+        transaction,
+    ):
+        (
+            transaction,
+            session_document,
+            quest_document,
+            stored_session,
+            stored_quest,
+        ) = _load_transaction_state(
+            transaction,
+            session.session_id,
+        )
+
+        _validate_expected_versions(
+            session,
+            quest,
+            stored_session,
+            stored_quest,
+        )
+
+        stored_discovered_count = len(
+            stored_quest.discovered_words
+        )
+
+        if stored_discovered_count >= 4:
+            raise ValueError(
+                "All hidden words have already been discovered."
+            )
+
+        expected_stored_word = (
+            LEVEL_HIDDEN_WORDS.get(
+                stored_discovered_count + 1
+            )
+        )
+
+        if expected_stored_word is None:
+            raise ValueError(
+                "No hidden word is configured for this progression step."
+            )
+
+        if (
+            normalized_word
+            != expected_stored_word.casefold()
+        ):
+            raise ValueError(
+                "The submitted hidden word is not valid."
+            )
+
+        if normalized_word in {
+            item.casefold()
+            for item in stored_quest.discovered_words
+        }:
+            return (
+                stored_session,
+                stored_quest,
+            )
+
+        discovered_words = list(
+            stored_quest.discovered_words
+        )
+
+        discovered_words.append(
+            normalized_word
+        )
+
+        stored_quest.discovered_words = (
+            discovered_words
+        )
+        stored_quest.version += 1
+
+        now = utc_now_iso()
+
+        # Discovering a word does not advance the quest state,
+        # but it is valid activity for the session.
+        stored_session.updated_at = now
+        stored_session.last_activity_at = now
+        stored_session.version += 1
+
+        transaction.update(
+            quest_document,
+            stored_quest.to_dict(),
+        )
+
+        transaction.update(
+            session_document,
+            stored_session.to_dict(),
+        )
+
+        return (
+            stored_session,
+            stored_quest,
+        )
 
     (
-        transaction,
-        session_document,
-        quest_document,
-        stored_session,
-        stored_quest,
-    ) = _load_transaction_state(
-        transaction,
-        session.session_id,
+        updated_session,
+        updated_quest,
+    ) = run_transaction(
+        word_operation
     )
 
-    _validate_expected_versions(
+    _copy_session_values(
         session,
+        updated_session,
+    )
+
+    _copy_quest_values(
         quest,
-        stored_session,
-        stored_quest,
+        updated_quest,
     )
-
-    stored_discovered_count = len(
-        stored_quest.discovered_words
-    )
-
-    if stored_discovered_count >= 4:
-        raise ValueError(
-            "All hidden words have already been discovered."
-        )
-
-    expected_stored_word = LEVEL_HIDDEN_WORDS.get(
-        stored_discovered_count + 1
-    )
-
-    if expected_stored_word is None:
-        raise ValueError(
-            "No hidden word is configured for this progression step."
-        )
-
-    if (
-        normalized_word
-        != expected_stored_word.casefold()
-    ):
-        raise ValueError(
-            "The submitted hidden word is not valid."
-        )
-
-    if normalized_word in {
-        item.casefold()
-        for item in stored_quest.discovered_words
-    }:
-        return stored_quest
-
-    discovered_words = list(
-        stored_quest.discovered_words
-    )
-
-    discovered_words.append(
-        normalized_word
-    )
-
-    stored_quest.discovered_words = discovered_words
-    stored_quest.version += 1
-
-    transaction.update(
-        quest_document,
-        stored_quest.to_dict(),
-    )
-
-    # Discovering a word does not itself advance the session
-    # state. We therefore do not modify the session state here.
-    #
-    # Activity is still updated so the session reflects recent
-    # valid interaction.
-
-    now = utc_now_iso()
-
-    stored_session.updated_at = now
-    stored_session.last_activity_at = now
-    stored_session.version += 1
-
-    transaction.update(
-        session_document,
-        stored_session.to_dict(),
-    )
-
-    transaction.commit()
-
-    quest.discovered_words = list(
-        stored_quest.discovered_words
-    )
-    quest.version = stored_quest.version
-
-    session.updated_at = stored_session.updated_at
-    session.last_activity_at = stored_session.last_activity_at
-    session.version = stored_session.version
 
     log_info(
         logger,
         "hidden_word_discovered",
         session_id=session.session_id,
-        word_index=stored_discovered_count + 1,
+        word_index=len(
+            quest.discovered_words
+        ),
     )
 
     return quest
@@ -1811,102 +2004,103 @@ def unlock_final_reveal(
     if quest.final_reveal_unlocked:
         return quest
 
-    next_state = STATE_FINAL_REVEAL
-
-    if not can_transition(
-        quest.state,
-        next_state,
+    def final_reveal_operation(
+        transaction,
     ):
-        raise ValueError(
-            "The final reveal transition is not allowed."
+        (
+            transaction,
+            session_document,
+            quest_document,
+            stored_session,
+            stored_quest,
+        ) = _load_transaction_state(
+            transaction,
+            session.session_id,
         )
 
-    transaction = _create_transaction()
+        _validate_expected_versions(
+            session,
+            quest,
+            stored_session,
+            stored_quest,
+        )
+
+        if not required_levels.issubset(
+            set(stored_quest.completed_levels)
+        ):
+            raise ValueError(
+                "All four quest levels must be completed first."
+            )
+
+        if stored_quest.current_level != 4:
+            raise ValueError(
+                "The quest must be at level 4 before "
+                "the final reveal can be unlocked."
+            )
+
+        if len(
+            stored_quest.discovered_words
+        ) != 4:
+            raise ValueError(
+                "All four hidden words must be discovered first."
+            )
+
+        if (
+            stored_quest.state
+            != STATE_LEVEL_4_COMPLETE
+        ):
+            raise ValueError(
+                "The final reveal is not currently available."
+            )
+
+        if stored_quest.final_reveal_unlocked:
+            return (
+                stored_session,
+                stored_quest,
+            )
+
+        now = utc_now_iso()
+
+        stored_quest.final_reveal_unlocked = True
+        stored_quest.state = STATE_FINAL_REVEAL
+        stored_quest.version += 1
+
+        stored_session.state = STATE_FINAL_REVEAL
+        stored_session.updated_at = now
+        stored_session.last_activity_at = now
+        stored_session.version += 1
+
+        transaction.update(
+            quest_document,
+            stored_quest.to_dict(),
+        )
+
+        transaction.update(
+            session_document,
+            stored_session.to_dict(),
+        )
+
+        return (
+            stored_session,
+            stored_quest,
+        )
 
     (
-        transaction,
-        session_document,
-        quest_document,
-        stored_session,
-        stored_quest,
-    ) = _load_transaction_state(
-        transaction,
-        session.session_id,
+        updated_session,
+        updated_quest,
+    ) = run_transaction(
+        final_reveal_operation
     )
 
-    _validate_expected_versions(
+    _copy_session_values(
         session,
+        updated_session,
+    )
+
+    _copy_quest_values(
         quest,
-        stored_session,
-        stored_quest,
+        updated_quest,
     )
-
-    required_levels = {
-        1,
-        2,
-        3,
-        4,
-    }
-
-    if not required_levels.issubset(
-        set(stored_quest.completed_levels)
-    ):
-        raise ValueError(
-            "All four quest levels must be completed first."
-        )
-
-    if stored_quest.current_level != 4:
-        raise ValueError(
-            "The quest must be at level 4 before "
-            "the final reveal can be unlocked."
-        )
-
-    if len(stored_quest.discovered_words) != 4:
-        raise ValueError(
-            "All four hidden words must be discovered first."
-        )
-
-    if stored_quest.state != STATE_LEVEL_4_COMPLETE:
-        raise ValueError(
-            "The final reveal is not currently available."
-        )
-
-    if stored_quest.final_reveal_unlocked:
-        return stored_quest
-
-    now = utc_now_iso()
-
-    stored_quest.final_reveal_unlocked = True
-    stored_quest.state = next_state
-    stored_quest.version += 1
-
-    stored_session.state = next_state
-    stored_session.updated_at = now
-    stored_session.last_activity_at = now
-    stored_session.version += 1
-
-    transaction.update(
-        quest_document,
-        stored_quest.to_dict(),
-    )
-
-    transaction.update(
-        session_document,
-        stored_session.to_dict(),
-    )
-
-    transaction.commit()
-
-    quest.final_reveal_unlocked = (
-        stored_quest.final_reveal_unlocked
-    )
-    quest.state = stored_quest.state
-    quest.version = stored_quest.version
-
-    session.state = stored_session.state
-    session.updated_at = stored_session.updated_at
-    session.last_activity_at = stored_session.last_activity_at
-    session.version = stored_session.version
 
     log_info(
         logger,
@@ -1914,4 +2108,4 @@ def unlock_final_reveal(
         session_id=session.session_id,
     )
 
-    return quest
+    return quest   
