@@ -4,37 +4,65 @@ Birthday Quest - Firebase Service
 Centralized Firebase Admin SDK initialization and Firestore
 access.
 
+Storage architecture:
+- Firebase Firestore -> sessions, quest state, metadata, audit data
+- Cloudinary -> permanent video/media storage
+- Render filesystem -> no permanent media storage
+
 IMPORTANT:
 - Firebase credentials are read only from environment variables.
 - No credentials are stored in source code.
 - Firebase initialization is lazy.
-- Public Firebase Admin SDK APIs are used for app discovery.
-- Initialization is protected against concurrent requests.
+- Firestore clients are reused.
+- Firestore transactions are exposed through this service layer.
 """
 
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 import firebase_admin
+
 from firebase_admin import credentials
 from firebase_admin import firestore
 
-from config import get_config
 
+# ============================================================
+# TYPES
+# ============================================================
+
+T = TypeVar(
+    "T"
+)
+
+
+# ============================================================
+# FIREBASE STATE
+# ============================================================
 
 _firebase_lock = threading.RLock()
 
 _firebase_app = None
+
 _firestore_client = None
 
+
+# ============================================================
+# FIREBASE CREDENTIALS
+# ============================================================
 
 def _get_credentials() -> credentials.Certificate:
     """
     Build Firebase service-account credentials from environment
     variables.
+
+    Credentials are imported lazily to avoid requiring Firebase
+    configuration merely to import this module.
     """
+
+    from config import get_config
+
     config = get_config()
 
     required_values = {
@@ -74,15 +102,18 @@ def _get_credentials() -> credentials.Certificate:
     )
 
 
+# ============================================================
+# FIREBASE APP
+# ============================================================
+
 def get_firebase_app():
     """
     Return the initialized Firebase application.
 
-    Firebase is initialized lazily on the first call.
-
-    A public Firebase Admin SDK lookup is attempted first.
-    If no default app exists, a new one is initialized safely.
+    Initialization is lazy and protected by a lock so concurrent
+    requests cannot initialize multiple default Firebase apps.
     """
+
     global _firebase_app
 
     if _firebase_app is not None:
@@ -94,6 +125,7 @@ def get_firebase_app():
 
         try:
             _firebase_app = firebase_admin.get_app()
+
         except ValueError:
             firebase_credential = _get_credentials()
 
@@ -104,13 +136,17 @@ def get_firebase_app():
         return _firebase_app
 
 
+# ============================================================
+# FIRESTORE CLIENT
+# ============================================================
+
 def get_firestore_client():
     """
     Return the shared Firestore client.
 
-    The client is created only once and reused for subsequent
-    requests.
+    The client is initialized only once and reused.
     """
+
     global _firestore_client
 
     if _firestore_client is not None:
@@ -129,11 +165,78 @@ def get_firestore_client():
         return _firestore_client
 
 
-def get_collection(collection_name: str):
+# ============================================================
+# TRANSACTIONS
+# ============================================================
+
+def create_transaction():
+    """
+    Create a new Firestore transaction.
+
+    The caller is responsible for:
+    - reading documents through the transaction
+    - applying transactional writes
+    - committing the transaction
+    """
+
+    client = get_firestore_client()
+
+    return client.transaction()
+
+
+def run_transaction(
+    callback: Callable[..., T],
+    *args: Any,
+    **kwargs: Any,
+) -> T:
+    """
+    Execute a callback inside a Firestore transaction.
+
+    The callback receives the transaction object as its first
+    argument.
+
+    Example:
+
+        def operation(transaction):
+            snapshot = transaction.get(document)
+            ...
+            transaction.update(document, {...})
+            return result
+
+        result = run_transaction(operation)
+    """
+
+    if not callable(callback):
+        raise TypeError(
+            "callback must be callable."
+        )
+
+    transaction = create_transaction()
+
+    return transaction.callable(
+        callback
+    )(
+        transaction,
+        *args,
+        **kwargs,
+    )
+
+
+# ============================================================
+# COLLECTION ACCESS
+# ============================================================
+
+def get_collection(
+    collection_name: str,
+):
     """
     Return a Firestore collection reference.
     """
-    if not isinstance(collection_name, str):
+
+    if not isinstance(
+        collection_name,
+        str,
+    ):
         raise TypeError(
             "collection_name must be a string."
         )
@@ -147,14 +250,17 @@ def get_collection(collection_name: str):
 
     if "/" in collection_name:
         raise ValueError(
-            "collection_name must contain only one "
-            "collection name."
+            "collection_name must contain only one collection name."
         )
 
     return get_firestore_client().collection(
         collection_name
     )
 
+
+# ============================================================
+# DOCUMENT ACCESS
+# ============================================================
 
 def get_document(
     collection_name: str,
@@ -163,7 +269,11 @@ def get_document(
     """
     Return a Firestore document reference.
     """
-    if not isinstance(document_id, str):
+
+    if not isinstance(
+        document_id,
+        str,
+    ):
         raise TypeError(
             "document_id must be a string."
         )
@@ -182,8 +292,14 @@ def get_document(
 
     return get_collection(
         collection_name
-    ).document(document_id)
+    ).document(
+        document_id
+    )
 
+
+# ============================================================
+# READ DOCUMENT
+# ============================================================
 
 def get_document_data(
     collection_name: str,
@@ -194,21 +310,30 @@ def get_document_data(
 
     Returns None when the document does not exist.
     """
+
     document = get_document(
         collection_name,
         document_id,
-    ).get()
+    )
 
-    if not document.exists:
+    snapshot = document.get()
+
+    if not snapshot.exists:
         return None
 
-    data = document.to_dict()
+    data = snapshot.to_dict()
 
     if data is None:
         return None
 
-    return dict(data)
+    return dict(
+        data
+    )
 
+
+# ============================================================
+# SET DOCUMENT
+# ============================================================
 
 def set_document_data(
     collection_name: str,
@@ -216,9 +341,13 @@ def set_document_data(
     data: dict[str, Any],
 ) -> None:
     """
-    Replace/create a Firestore document.
+    Replace or create a Firestore document.
     """
-    if not isinstance(data, dict):
+
+    if not isinstance(
+        data,
+        dict,
+    ):
         raise TypeError(
             "data must be a dictionary."
         )
@@ -226,8 +355,45 @@ def set_document_data(
     get_document(
         collection_name,
         document_id,
-    ).set(data)
+    ).set(
+        data
+    )
 
+
+# ============================================================
+# CREATE DOCUMENT
+# ============================================================
+
+def create_document_data(
+    collection_name: str,
+    document_id: str,
+    data: dict[str, Any],
+) -> None:
+    """
+    Create a Firestore document.
+
+    Raises an error if the document already exists.
+    """
+
+    if not isinstance(
+        data,
+        dict,
+    ):
+        raise TypeError(
+            "data must be a dictionary."
+        )
+
+    get_document(
+        collection_name,
+        document_id,
+    ).create(
+        data
+    )
+
+
+# ============================================================
+# UPDATE DOCUMENT
+# ============================================================
 
 def update_document_data(
     collection_name: str,
@@ -237,7 +403,11 @@ def update_document_data(
     """
     Update selected fields in an existing Firestore document.
     """
-    if not isinstance(data, dict):
+
+    if not isinstance(
+        data,
+        dict,
+    ):
         raise TypeError(
             "data must be a dictionary."
         )
@@ -250,8 +420,14 @@ def update_document_data(
     get_document(
         collection_name,
         document_id,
-    ).update(data)
+    ).update(
+        data
+    )
 
+
+# ============================================================
+# DELETE DOCUMENT
+# ============================================================
 
 def delete_document(
     collection_name: str,
@@ -260,6 +436,7 @@ def delete_document(
     """
     Delete a Firestore document.
     """
+
     get_document(
         collection_name,
         document_id,
