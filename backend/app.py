@@ -9,10 +9,13 @@ from __future__ import annotations
 import logging
 import os
 
-from flask import Flask, jsonify
+from flask import Flask
 
 from config import get_config
 from extensions import init_extensions
+from middleware.errors import register_error_middleware
+from middleware.request_id import register_request_id_middleware
+from middleware.security import register_security_middleware
 from routes.health import health_bp
 
 
@@ -86,66 +89,6 @@ def register_security_headers(app: Flask) -> None:
 
 
 # ------------------------------------------------------------
-# ERROR HANDLERS
-# ------------------------------------------------------------
-
-def register_error_handlers(app: Flask) -> None:
-    """Register centralized HTTP error responses."""
-
-    @app.errorhandler(404)
-    def handle_not_found(error):
-        return jsonify(
-            {
-                "success": False,
-                "error": {
-                    "code": "NOT_FOUND",
-                    "message": "The requested resource was not found.",
-                },
-            }
-        ), 404
-
-    @app.errorhandler(405)
-    def handle_method_not_allowed(error):
-        return jsonify(
-            {
-                "success": False,
-                "error": {
-                    "code": "METHOD_NOT_ALLOWED",
-                    "message": "The requested HTTP method is not allowed.",
-                },
-            }
-        ), 405
-
-    @app.errorhandler(413)
-    def handle_request_too_large(error):
-        return jsonify(
-            {
-                "success": False,
-                "error": {
-                    "code": "REQUEST_TOO_LARGE",
-                    "message": "The request is too large.",
-                },
-            }
-        ), 413
-
-    @app.errorhandler(500)
-    def handle_internal_error(error):
-        app.logger.exception(
-            "Unhandled internal server error."
-        )
-
-        return jsonify(
-            {
-                "success": False,
-                "error": {
-                    "code": "INTERNAL_SERVER_ERROR",
-                    "message": "An internal server error occurred.",
-                },
-            }
-        ), 500
-
-
-# ------------------------------------------------------------
 # BLUEPRINTS
 # ------------------------------------------------------------
 
@@ -207,12 +150,19 @@ def create_app() -> Flask:
     # --------------------------------------------------------
 
     register_security_headers(app)
+    register_security_middleware(app)
 
     # --------------------------------------------------------
-    # ERROR HANDLERS
+    # REQUEST TRACKING
     # --------------------------------------------------------
 
-    register_error_handlers(app)
+    register_request_id_middleware(app)
+
+    # --------------------------------------------------------
+    # ERROR HANDLING
+    # --------------------------------------------------------
+
+    register_error_middleware(app)
 
     # --------------------------------------------------------
     # ROUTES
