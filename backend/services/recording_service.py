@@ -16,17 +16,9 @@ Architecture:
             v
     Quest State Machine
 
-IMPORTANT:
-- The browser owns camera/microphone access and MediaRecorder.
-- This service owns recording authorization, lifecycle state,
-  metadata validation, Cloudinary upload, and verification.
-- Permanent video files are stored in Cloudinary.
-- Firestore stores metadata only.
-- Render's filesystem is never used as permanent storage.
-- Recording IDs are generated server-side.
-- A recording belongs to exactly one session.
-- Recording lifecycle operations are validated server-side.
-- Uploads are designed to be retry-safe.
+The browser owns camera/microphone access and MediaRecorder.
+The backend owns authorization, lifecycle state, metadata
+validation, Cloudinary storage, and verification.
 """
 
 from __future__ import annotations
@@ -46,7 +38,6 @@ from services.firebase_service import (
 
 from services.quest_service import (
     STATE_BIRTHDAY_SCENE,
-    STATE_CANDLE_TRIGGERED,
     STATE_FINAL_VIDEO_COMPLETED,
     STATE_REACTION_RECORDING,
     STATE_REACTION_UPLOAD,
@@ -57,16 +48,14 @@ from services.quest_service import (
     STATE_VIDEO_1_VERIFIED,
     STATE_VIDEO_2_READY,
     STATE_VIDEO_2_RECORDING,
+    get_quest,
     transition_quest,
 )
 
 from services.validation_service import (
-    validate_recording_content_type,
-    validate_recording_duration,
-    validate_recording_identifier,
-    validate_recording_size,
+    ValidationError,
     validate_recording_type,
-    validate_session_identifier,
+    validate_session_id,
 )
 
 from utils.ids import generate_recording_id
@@ -78,10 +67,6 @@ from utils.logging import (
 )
 from utils.timestamps import utc_now_iso
 
-
-# ============================================================
-# LOGGER
-# ============================================================
 
 logger = get_logger(__name__)
 
@@ -124,6 +109,28 @@ STATUS_FAILED = "failed"
 
 
 # ============================================================
+# LIMITS
+# ============================================================
+
+# These are deliberately conservative backend limits.
+# The frontend can use smaller limits, but must never bypass
+# these server-side limits.
+
+MAX_DURATION_MS = 30 * 60 * 1000
+MAX_FILE_SIZE_BYTES = 250 * 1024 * 1024
+
+ALLOWED_CONTENT_TYPES = frozenset(
+    {
+        "video/webm",
+        "video/mp4",
+        "video/quicktime",
+        "video/x-matroska",
+        "video/ogg",
+    }
+)
+
+
+# ============================================================
 # CLOUDINARY
 # ============================================================
 
@@ -134,13 +141,7 @@ CLOUDINARY_FOLDER = "birthday-quest/recordings"
 # INTERNAL HELPERS
 # ============================================================
 
-def _get_recording_document(
-    recording_id: str,
-):
-    """
-    Return the Firestore document reference for a recording.
-    """
-
+def _get_recording_document(recording_id: str):
     return get_document(
         RECORDINGS_COLLECTION,
         recording_id,
@@ -148,44 +149,37 @@ def _get_recording_document(
 
 
 def _get_transaction():
-    """
-    Create a Firestore transaction.
-    """
-
     return get_firestore_client().transaction()
 
 
-def _validate_session(
-    session: Session,
-) -> None:
-    """
-    Validate that a usable session object was supplied.
-    """
-
-    if not isinstance(
-        session,
-        Session,
-    ):
+def _validate_session(session: Session) -> None:
+    if not isinstance(session, Session):
         raise TypeError(
             "session must be a Session instance."
         )
+
+    validate_session_id(session.session_id)
 
     if not session.active:
         raise ValueError(
             "The session is inactive."
         )
 
+    if session.state == "SESSION_COMPLETE":
+        raise ValueError(
+            "The session is already complete."
+        )
+
 
 def _validate_recording_type_for_service(
     recording_type: Any,
 ) -> str:
-    """
-    Validate and normalize recording type.
-    """
-
-    normalized = validate_recording_type(
-        recording_type
-    )
+    try:
+        normalized = validate_recording_type(
+            recording_type
+        )
+    except ValidationError as exc:
+        raise ValueError(str(exc)) from exc
 
     if normalized not in ALLOWED_RECORDING_TYPES:
         raise ValueError(
@@ -195,13 +189,32 @@ def _validate_recording_type_for_service(
     return normalized
 
 
+def _validate_recording_id(
+    recording_id: Any,
+) -> str:
+    if not isinstance(recording_id, str):
+        raise ValueError(
+            "recording_id must be a string."
+        )
+
+    recording_id = recording_id.strip()
+
+    if not recording_id:
+        raise ValueError(
+            "recording_id is required."
+        )
+
+    if len(recording_id) > 128:
+        raise ValueError(
+            "recording_id is too long."
+        )
+
+    return recording_id
+
+
 def _get_recording(
     recording_id: str,
 ) -> Recording | None:
-    """
-    Retrieve a recording from Firestore.
-    """
-
     data = get_document_data(
         RECORDINGS_COLLECTION,
         recording_id,
@@ -210,19 +223,13 @@ def _get_recording(
     if data is None:
         return None
 
-    return Recording.from_dict(
-        data
-    )
+    return Recording.from_dict(data)
 
 
 def _validate_recording_ownership(
     recording: Recording,
     session: Session,
 ) -> None:
-    """
-    Ensure the recording belongs to the current session.
-    """
-
     if recording.session_id != session.session_id:
         raise ValueError(
             "The recording does not belong to this session."
@@ -233,14 +240,7 @@ def _validate_recording_version(
     supplied_recording: Recording,
     stored_recording: Recording,
 ) -> None:
-    """
-    Prevent stale recording objects from overwriting newer data.
-    """
-
-    if (
-        supplied_recording.version
-        != stored_recording.version
-    ):
+    if supplied_recording.version != stored_recording.version:
         raise RuntimeError(
             "Recording version conflict. "
             "The recording was modified by another request."
@@ -250,13 +250,7 @@ def _validate_recording_version(
 def _build_cloudinary_public_id(
     recording_id: str,
 ) -> str:
-    """
-    Build the permanent Cloudinary public ID.
-
-    The recording UUID remains the unique identifier.
-    """
-
-    recording_id = validate_recording_identifier(
+    recording_id = _validate_recording_id(
         recording_id
     )
 
@@ -271,45 +265,74 @@ def _validate_upload_metadata(
     duration_ms: int | None,
     file_size_bytes: int | None,
     content_type: str | None,
-) -> tuple[
-    int | None,
-    int | None,
-    str | None,
-]:
-    """
-    Validate optional upload metadata.
-
-    The browser may supply these values, but the backend treats
-    them as untrusted input.
-    """
-
-    validated_duration = None
+) -> tuple[int | None, int | None, str | None]:
 
     if duration_ms is not None:
-        validated_duration = validate_recording_duration(
-            duration_ms
-        )
+        if isinstance(duration_ms, bool):
+            raise ValueError(
+                "duration_ms must be an integer."
+            )
 
-    validated_size = None
+        if not isinstance(duration_ms, int):
+            raise ValueError(
+                "duration_ms must be an integer."
+            )
+
+        if duration_ms <= 0:
+            raise ValueError(
+                "duration_ms must be greater than zero."
+            )
+
+        if duration_ms > MAX_DURATION_MS:
+            raise ValueError(
+                "Recording duration exceeds the allowed limit."
+            )
 
     if file_size_bytes is not None:
-        validated_size = validate_recording_size(
-            file_size_bytes
-        )
+        if isinstance(file_size_bytes, bool):
+            raise ValueError(
+                "file_size_bytes must be an integer."
+            )
 
-    validated_content_type = None
+        if not isinstance(file_size_bytes, int):
+            raise ValueError(
+                "file_size_bytes must be an integer."
+            )
+
+        if file_size_bytes <= 0:
+            raise ValueError(
+                "file_size_bytes must be greater than zero."
+            )
+
+        if file_size_bytes > MAX_FILE_SIZE_BYTES:
+            raise ValueError(
+                "Recording file exceeds the allowed size."
+            )
+
+    normalized_content_type = None
 
     if content_type is not None:
-        validated_content_type = (
-            validate_recording_content_type(
-                content_type
+        if not isinstance(content_type, str):
+            raise ValueError(
+                "content_type must be a string."
             )
+
+        normalized_content_type = (
+            content_type.strip().lower()
         )
 
+        if (
+            normalized_content_type
+            not in ALLOWED_CONTENT_TYPES
+        ):
+            raise ValueError(
+                "Unsupported recording content type."
+            )
+
     return (
-        validated_duration,
-        validated_size,
-        validated_content_type,
+        duration_ms,
+        file_size_bytes,
+        normalized_content_type,
     )
 
 
@@ -317,13 +340,6 @@ def _validate_start_state(
     session: Session,
     recording_type: str,
 ) -> None:
-    """
-    Validate whether a recording of the requested type may
-    start from the current quest/session state.
-
-    Quest state itself is revalidated again by transition_quest()
-    before the actual state change.
-    """
 
     state = session.state
 
@@ -356,9 +372,6 @@ def _validate_start_state(
 def _get_start_state(
     recording_type: str,
 ) -> str:
-    """
-    Return the quest state that represents an active recording.
-    """
 
     mapping = {
         RECORDING_TYPE_VIDEO_1: STATE_VIDEO_1_RECORDING,
@@ -374,103 +387,38 @@ def _get_start_state(
         ) from exc
 
 
-def _get_upload_pending_state(
-    recording_type: str,
-) -> str:
-    """
-    Return the quest state required before upload.
-    """
+def _update_recording_after_transaction(
+    target: Recording,
+    source: Recording,
+) -> Recording:
 
-    mapping = {
-        RECORDING_TYPE_VIDEO_1: STATE_VIDEO_1_UPLOAD_PENDING,
-        RECORDING_TYPE_VIDEO_2: STATE_VIDEO_2_RECORDING,
-        RECORDING_TYPE_REACTION: STATE_REACTION_UPLOAD,
-    }
-
-    try:
-        return mapping[recording_type]
-    except KeyError as exc:
-        raise ValueError(
-            "Unsupported recording type."
-        ) from exc
-
-
-def _get_uploaded_state(
-    recording_type: str,
-) -> str | None:
-    """
-    Return the quest state after a successful upload.
-
-    Video 2 intentionally remains in VIDEO_2_RECORDING until
-    the later quest flow confirms the wall unlock transition.
-    """
-
-    mapping = {
-        RECORDING_TYPE_VIDEO_1: STATE_VIDEO_1_UPLOADED,
-        RECORDING_TYPE_VIDEO_2: None,
-        RECORDING_TYPE_REACTION: None,
-    }
-
-    return mapping.get(
-        recording_type
+    target.status = source.status
+    target.updated_at = source.updated_at
+    target.version = source.version
+    target.cloudinary_public_id = (
+        source.cloudinary_public_id
     )
+    target.secure_url = source.secure_url
+    target.resource_type = source.resource_type
+    target.duration_ms = source.duration_ms
+    target.file_size_bytes = source.file_size_bytes
+    target.content_type = source.content_type
+    target.completed_at = source.completed_at
+    target.metadata = dict(source.metadata)
 
-
-def _get_verified_state(
-    recording_type: str,
-) -> str | None:
-    """
-    Return the quest state after Cloudinary verification.
-
-    Only Video 1 has a dedicated verification state in the
-    currently locked quest state machine.
-    """
-
-    mapping = {
-        RECORDING_TYPE_VIDEO_1: STATE_VIDEO_1_VERIFIED,
-        RECORDING_TYPE_VIDEO_2: None,
-        RECORDING_TYPE_REACTION: None,
-    }
-
-    return mapping.get(
-        recording_type
-    )
+    return target
 
 
 # ============================================================
-# CREATE / START RECORDING
+# START RECORDING
 # ============================================================
 
 def start_recording(
     session: Session,
     recording_type: str,
 ) -> Recording:
-    """
-    Create and authorize a new recording.
 
-    Flow:
-
-        current quest state
-                |
-                v
-        authorize recording
-                |
-                v
-        create Firestore metadata
-                |
-                v
-        transition quest state
-                |
-                v
-        browser starts MediaRecorder
-
-    The browser should only start recording after this function
-    succeeds.
-    """
-
-    _validate_session(
-        session
-    )
+    _validate_session(session)
 
     recording_type = (
         _validate_recording_type_for_service(
@@ -483,8 +431,33 @@ def start_recording(
         recording_type,
     )
 
-    recording_id = generate_recording_id()
+    # Always obtain the current quest from Firestore.
+    # The caller's session object may be older than the server.
+    quest = get_quest(
+        session.session_id
+    )
 
+    if quest is None:
+        raise ValueError(
+            "Quest not found for this session."
+        )
+
+    _validate_start_state(
+        Session(
+            session_id=session.session_id,
+            state=quest.state,
+            active=session.active,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            last_activity_at=session.last_activity_at,
+            completed_at=session.completed_at,
+            version=session.version,
+            metadata=dict(session.metadata),
+        ),
+        recording_type,
+    )
+
+    recording_id = generate_recording_id()
     now = utc_now_iso()
 
     recording = Recording(
@@ -518,8 +491,7 @@ def start_recording(
 
     if snapshot.exists:
         raise RuntimeError(
-            "A generated recording identifier already exists. "
-            "Please retry recording creation."
+            "Generated recording ID already exists."
         )
 
     transaction.create(
@@ -529,41 +501,21 @@ def start_recording(
 
     transaction.commit()
 
-    next_state = _get_start_state(
-        recording_type
-    )
-
     try:
-        # The quest service performs server-side state
-        # validation and version checks.
-        from services.quest_service import (
-            get_quest,
-        )
-
-        quest = get_quest(
-            session.session_id
-        )
-
-        if quest is None:
-            raise ValueError(
-                "Quest not found for this session."
-            )
-
         transition_quest(
             session=session,
             quest=quest,
-            next_state=next_state,
+            next_state=_get_start_state(
+                recording_type
+            ),
         )
 
     except Exception:
-        # The recording metadata exists, but the quest transition
-        # did not succeed. Mark the recording failed instead of
-        # leaving a misleading active recording.
         try:
-            fail_recording(
+            mark_recording_failed(
                 session=session,
                 recording_id=recording_id,
-                reason="Quest state transition failed.",
+                reason="Quest transition failed.",
             )
         except Exception:
             log_error(
@@ -579,37 +531,25 @@ def start_recording(
         logger,
         "recording_started",
         session_id=session.session_id,
-        recording_id=recording.recording_id,
-        recording_type=recording.recording_type,
+        recording_id=recording_id,
+        recording_type=recording_type,
     )
 
     return recording
 
 
 # ============================================================
-# STOP / MARK STOPPING
+# STOP RECORDING
 # ============================================================
 
 def mark_recording_stopping(
     session: Session,
     recording_id: str,
 ) -> Recording:
-    """
-    Mark an active recording as stopping.
 
-    This does not upload anything.
+    _validate_session(session)
 
-    The browser should:
-        1. stop MediaRecorder
-        2. create the final Blob
-        3. send that Blob to the upload endpoint
-    """
-
-    _validate_session(
-        session
-    )
-
-    recording_id = validate_recording_identifier(
+    recording_id = _validate_recording_id(
         recording_id
     )
 
@@ -635,11 +575,11 @@ def mark_recording_stopping(
             "Only an active recording can be stopped."
         )
 
-    transaction = _get_transaction()
-
     recording_document = _get_recording_document(
         recording_id
     )
+
+    transaction = _get_transaction()
 
     snapshot = transaction.get(
         recording_document
@@ -652,61 +592,50 @@ def mark_recording_stopping(
 
     data = snapshot.to_dict()
 
-    if not isinstance(
-        data,
-        dict,
-    ):
+    if not isinstance(data, dict):
         raise RuntimeError(
             "Stored recording data is invalid."
         )
 
-    stored_recording = Recording.from_dict(
-        data
-    )
+    stored = Recording.from_dict(data)
 
     _validate_recording_ownership(
-        stored_recording,
+        stored,
         session,
     )
 
     _validate_recording_version(
         recording,
-        stored_recording,
+        stored,
     )
 
-    if stored_recording.status == STATUS_STOPPING:
-        return stored_recording
+    if stored.status == STATUS_STOPPING:
+        return stored
 
-    if stored_recording.status != STATUS_RECORDING:
+    if stored.status != STATUS_RECORDING:
         raise ValueError(
             "Only an active recording can be stopped."
         )
 
     now = utc_now_iso()
 
-    stored_recording.status = STATUS_STOPPING
-    stored_recording.updated_at = now
-    stored_recording.version += 1
+    stored.status = STATUS_STOPPING
+    stored.updated_at = now
+    stored.version += 1
 
     transaction.update(
         recording_document,
-        stored_recording.to_dict(),
+        stored.to_dict(),
     )
 
     transaction.commit()
 
-    recording.status = stored_recording.status
-    recording.updated_at = stored_recording.updated_at
-    recording.version = stored_recording.version
+    _update_recording_after_transaction(
+        recording,
+        stored,
+    )
 
-    # Video 1 has an explicit STOPPING state in the quest
-    # state machine. Other recording types have their own
-    # lifecycle states and are not forced through this state.
-    if (
-        recording.recording_type
-        == RECORDING_TYPE_VIDEO_1
-    ):
-        from services.quest_service import get_quest
+    if recording.recording_type == RECORDING_TYPE_VIDEO_1:
 
         quest = get_quest(
             session.session_id
@@ -728,15 +657,14 @@ def mark_recording_stopping(
         logger,
         "recording_stopping",
         session_id=session.session_id,
-        recording_id=recording.recording_id,
-        recording_type=recording.recording_type,
+        recording_id=recording_id,
     )
 
     return recording
 
 
 # ============================================================
-# PREPARE UPLOAD
+# UPLOAD PENDING
 # ============================================================
 
 def mark_recording_upload_pending(
@@ -747,30 +675,10 @@ def mark_recording_upload_pending(
     file_size_bytes: int | None = None,
     content_type: str | None = None,
 ) -> Recording:
-    """
-    Mark a recording as ready for upload.
 
-    This validates metadata but does not contact Cloudinary.
+    _validate_session(session)
 
-    Expected browser flow:
-
-        MediaRecorder.stop()
-                |
-                v
-        Blob created
-                |
-                v
-        mark upload pending
-                |
-                v
-        upload_recording()
-    """
-
-    _validate_session(
-        session
-    )
-
-    recording_id = validate_recording_identifier(
+    recording_id = _validate_recording_id(
         recording_id
     )
 
@@ -802,18 +710,18 @@ def mark_recording_upload_pending(
         return recording
 
     if recording.status not in {
-        STATUS_STOPPING,
         STATUS_RECORDING,
+        STATUS_STOPPING,
     }:
         raise ValueError(
-            "The recording is not ready to enter the upload stage."
+            "Recording is not ready for upload."
         )
-
-    transaction = _get_transaction()
 
     recording_document = _get_recording_document(
         recording_id
     )
+
+    transaction = _get_transaction()
 
     snapshot = transaction.get(
         recording_document
@@ -826,75 +734,62 @@ def mark_recording_upload_pending(
 
     data = snapshot.to_dict()
 
-    if not isinstance(
-        data,
-        dict,
-    ):
+    if not isinstance(data, dict):
         raise RuntimeError(
             "Stored recording data is invalid."
         )
 
-    stored_recording = Recording.from_dict(
-        data
-    )
+    stored = Recording.from_dict(data)
 
     _validate_recording_ownership(
-        stored_recording,
+        stored,
         session,
     )
 
     _validate_recording_version(
         recording,
-        stored_recording,
+        stored,
     )
 
-    if stored_recording.status == STATUS_UPLOAD_PENDING:
-        return stored_recording
+    if stored.status == STATUS_UPLOAD_PENDING:
+        return stored
 
-    if stored_recording.status not in {
-        STATUS_STOPPING,
+    if stored.status not in {
         STATUS_RECORDING,
+        STATUS_STOPPING,
     }:
         raise ValueError(
-            "The recording is not ready to enter the upload stage."
+            "Recording is not ready for upload."
         )
 
     now = utc_now_iso()
 
-    stored_recording.status = STATUS_UPLOAD_PENDING
-    stored_recording.updated_at = now
-    stored_recording.version += 1
+    stored.status = STATUS_UPLOAD_PENDING
+    stored.updated_at = now
+    stored.version += 1
 
     if duration_ms is not None:
-        stored_recording.duration_ms = duration_ms
+        stored.duration_ms = duration_ms
 
     if file_size_bytes is not None:
-        stored_recording.file_size_bytes = file_size_bytes
+        stored.file_size_bytes = file_size_bytes
 
     if content_type is not None:
-        stored_recording.content_type = content_type
+        stored.content_type = content_type
 
     transaction.update(
         recording_document,
-        stored_recording.to_dict(),
+        stored.to_dict(),
     )
 
     transaction.commit()
 
-    recording.status = stored_recording.status
-    recording.updated_at = stored_recording.updated_at
-    recording.version = stored_recording.version
-    recording.duration_ms = stored_recording.duration_ms
-    recording.file_size_bytes = stored_recording.file_size_bytes
-    recording.content_type = stored_recording.content_type
+    _update_recording_after_transaction(
+        recording,
+        stored,
+    )
 
-    # Video 1 must explicitly reach UPLOAD_PENDING before
-    # Cloudinary upload.
-    if (
-        recording.recording_type
-        == RECORDING_TYPE_VIDEO_1
-    ):
-        from services.quest_service import get_quest
+    if recording.recording_type == RECORDING_TYPE_VIDEO_1:
 
         quest = get_quest(
             session.session_id
@@ -916,14 +811,14 @@ def mark_recording_upload_pending(
         logger,
         "recording_upload_pending",
         session_id=session.session_id,
-        recording_id=recording.recording_id,
+        recording_id=recording_id,
     )
 
     return recording
 
 
 # ============================================================
-# CLOUDINARY UPLOAD
+# UPLOAD TO CLOUDINARY
 # ============================================================
 
 def upload_recording(
@@ -935,24 +830,10 @@ def upload_recording(
     file_size_bytes: int | None = None,
     content_type: str | None = None,
 ) -> Recording:
-    """
-    Upload a recording to Cloudinary.
 
-    This method is retry-safe at the application level:
+    _validate_session(session)
 
-    - If the recording is already verified, it returns the
-      existing verified metadata.
-    - If Cloudinary already contains the expected public ID,
-      the existing asset is reused rather than creating another
-      permanent asset.
-    - Firestore remains the source of recording lifecycle state.
-    """
-
-    _validate_session(
-        session
-    )
-
-    recording_id = validate_recording_identifier(
+    recording_id = _validate_recording_id(
         recording_id
     )
 
@@ -993,18 +874,18 @@ def upload_recording(
         STATUS_UPLOADING,
     }:
         raise ValueError(
-            "The recording is not ready for upload."
+            "Recording is not ready for upload."
         )
-
-    # --------------------------------------------------------
-    # Persist metadata before external upload.
-    # --------------------------------------------------------
-
-    transaction = _get_transaction()
 
     recording_document = _get_recording_document(
         recording_id
     )
+
+    # --------------------------------------------------------
+    # Claim upload operation atomically.
+    # --------------------------------------------------------
+
+    transaction = _get_transaction()
 
     snapshot = transaction.get(
         recording_document
@@ -1017,70 +898,63 @@ def upload_recording(
 
     data = snapshot.to_dict()
 
-    if not isinstance(
-        data,
-        dict,
-    ):
+    if not isinstance(data, dict):
         raise RuntimeError(
             "Stored recording data is invalid."
         )
 
-    stored_recording = Recording.from_dict(
-        data
-    )
+    stored = Recording.from_dict(data)
 
     _validate_recording_ownership(
-        stored_recording,
+        stored,
         session,
     )
 
+    if stored.status == STATUS_VERIFIED:
+        return stored
+
     _validate_recording_version(
         recording,
-        stored_recording,
+        stored,
     )
 
-    if stored_recording.status == STATUS_VERIFIED:
-        return stored_recording
-
-    if stored_recording.status not in {
+    if stored.status not in {
         STATUS_UPLOAD_PENDING,
         STATUS_UPLOADING,
     }:
         raise ValueError(
-            "The recording is not ready for upload."
+            "Recording is not ready for upload."
         )
 
     now = utc_now_iso()
 
-    stored_recording.status = STATUS_UPLOADING
-    stored_recording.updated_at = now
-    stored_recording.version += 1
+    stored.status = STATUS_UPLOADING
+    stored.updated_at = now
+    stored.version += 1
 
     if duration_ms is not None:
-        stored_recording.duration_ms = duration_ms
+        stored.duration_ms = duration_ms
 
     if file_size_bytes is not None:
-        stored_recording.file_size_bytes = file_size_bytes
+        stored.file_size_bytes = file_size_bytes
 
     if content_type is not None:
-        stored_recording.content_type = content_type
+        stored.content_type = content_type
 
     transaction.update(
         recording_document,
-        stored_recording.to_dict(),
+        stored.to_dict(),
     )
 
     transaction.commit()
 
-    recording.status = stored_recording.status
-    recording.updated_at = stored_recording.updated_at
-    recording.version = stored_recording.version
-    recording.duration_ms = stored_recording.duration_ms
-    recording.file_size_bytes = stored_recording.file_size_bytes
-    recording.content_type = stored_recording.content_type
+    _update_recording_after_transaction(
+        recording,
+        stored,
+    )
 
     # --------------------------------------------------------
-    # Cloudinary
+    # Cloudinary upload.
     # --------------------------------------------------------
 
     public_id = _build_cloudinary_public_id(
@@ -1088,40 +962,25 @@ def upload_recording(
     )
 
     try:
-        # First attempt to find an already uploaded asset.
-        existing_asset = None
-
-        try:
-            existing_asset = (
-                cloudinary_service.verify_video(
-                    public_id
-                )
+        upload_result = (
+            cloudinary_service.upload_video(
+                file_object=file_object,
+                public_id=recording_id,
+                folder=CLOUDINARY_FOLDER,
             )
-        except Exception:
-            existing_asset = None
+        )
 
-        if existing_asset:
-            upload_result = existing_asset
-
-            log_info(
-                logger,
-                "existing_cloudinary_asset_reused",
-                session_id=session.session_id,
-                recording_id=recording_id,
-                public_id=public_id,
+        if not isinstance(
+            upload_result,
+            dict,
+        ):
+            raise RuntimeError(
+                "Cloudinary returned invalid upload data."
             )
 
-        else:
-            upload_result = (
-                cloudinary_service.upload_video(
-                    file_object=file_object,
-                    public_id=recording_id,
-                    folder=CLOUDINARY_FOLDER,
-                )
-            )
-
-        returned_public_id = upload_result.get(
-            "public_id"
+        returned_public_id = (
+            upload_result.get("public_id")
+            or public_id
         )
 
         secure_url = upload_result.get(
@@ -1131,14 +990,6 @@ def upload_recording(
         resource_type = upload_result.get(
             "resource_type"
         )
-
-        if not returned_public_id:
-            returned_public_id = public_id
-
-        if not secure_url:
-            raise RuntimeError(
-                "Cloudinary did not return a secure URL."
-            )
 
         if not isinstance(
             secure_url,
@@ -1152,11 +1003,11 @@ def upload_recording(
 
         if resource_type != "video":
             raise RuntimeError(
-                "Cloudinary returned an unexpected resource type."
+                "Cloudinary returned a non-video resource."
             )
 
         # ----------------------------------------------------
-        # Persist uploaded state.
+        # Persist Cloudinary metadata.
         # ----------------------------------------------------
 
         transaction = _get_transaction()
@@ -1172,64 +1023,50 @@ def upload_recording(
 
         latest_data = snapshot.to_dict()
 
-        if not isinstance(
-            latest_data,
-            dict,
-        ):
+        if not isinstance(latest_data, dict):
             raise RuntimeError(
                 "Stored recording data is invalid."
             )
 
-        latest_recording = Recording.from_dict(
+        latest = Recording.from_dict(
             latest_data
         )
 
         _validate_recording_ownership(
-            latest_recording,
+            latest,
             session,
         )
 
-        if latest_recording.status == STATUS_VERIFIED:
-            return latest_recording
+        if latest.status == STATUS_VERIFIED:
+            return latest
 
-        now = utc_now_iso()
+        if latest.status != STATUS_UPLOADING:
+            raise RuntimeError(
+                "Recording upload state changed unexpectedly."
+            )
 
-        latest_recording.cloudinary_public_id = (
+        latest.cloudinary_public_id = (
             returned_public_id
         )
-
-        latest_recording.secure_url = secure_url
-        latest_recording.resource_type = resource_type
-        latest_recording.status = STATUS_UPLOADED
-        latest_recording.updated_at = now
-        latest_recording.version += 1
+        latest.secure_url = secure_url
+        latest.resource_type = resource_type
+        latest.status = STATUS_UPLOADED
+        latest.updated_at = utc_now_iso()
+        latest.version += 1
 
         transaction.update(
             recording_document,
-            latest_recording.to_dict(),
+            latest.to_dict(),
         )
 
         transaction.commit()
 
-        recording.cloudinary_public_id = (
-            latest_recording.cloudinary_public_id
+        _update_recording_after_transaction(
+            recording,
+            latest,
         )
-        recording.secure_url = (
-            latest_recording.secure_url
-        )
-        recording.resource_type = (
-            latest_recording.resource_type
-        )
-        recording.status = latest_recording.status
-        recording.updated_at = latest_recording.updated_at
-        recording.version = latest_recording.version
 
-        # Video 1 explicitly advances to UPLOADED.
-        if (
-            recording.recording_type
-            == RECORDING_TYPE_VIDEO_1
-        ):
-            from services.quest_service import get_quest
+        if recording.recording_type == RECORDING_TYPE_VIDEO_1:
 
             quest = get_quest(
                 session.session_id
@@ -1252,12 +1089,12 @@ def upload_recording(
             "recording_uploaded",
             session_id=session.session_id,
             recording_id=recording_id,
-            public_id=returned_public_id,
         )
 
         return recording
 
     except Exception as exc:
+
         log_error(
             logger,
             "recording_upload_failed",
@@ -1272,38 +1109,30 @@ def upload_recording(
                 recording_id=recording_id,
                 reason="Cloudinary upload failed.",
             )
-        except Exception:
+        except Exception as failure_exc:
             log_error(
                 logger,
                 "recording_failure_persistence_failed",
                 session_id=session.session_id,
                 recording_id=recording_id,
+                error=str(failure_exc),
             )
 
         raise
 
 
 # ============================================================
-# CLOUDINARY VERIFICATION
+# VERIFY CLOUDINARY ASSET
 # ============================================================
 
 def verify_recording(
     session: Session,
     recording_id: str,
 ) -> Recording:
-    """
-    Verify that the uploaded recording actually exists in
-    Cloudinary as a video.
 
-    Verification is separate from upload so the backend never
-    assumes that a successful upload call alone is sufficient.
-    """
+    _validate_session(session)
 
-    _validate_session(
-        session
-    )
-
-    recording_id = validate_recording_identifier(
+    recording_id = _validate_recording_id(
         recording_id
     )
 
@@ -1331,7 +1160,7 @@ def verify_recording(
 
     if not recording.cloudinary_public_id:
         raise ValueError(
-            "The recording has no Cloudinary public ID."
+            "Recording has no Cloudinary public ID."
         )
 
     try:
@@ -1346,9 +1175,15 @@ def verify_recording(
             recording_id=recording_id,
             error=str(exc),
         )
+
         raise RuntimeError(
             "The recording could not be verified in Cloudinary."
         ) from exc
+
+    if not isinstance(asset, dict):
+        raise RuntimeError(
+            "Cloudinary returned invalid verification data."
+        )
 
     secure_url = asset.get(
         "secure_url"
@@ -1358,11 +1193,6 @@ def verify_recording(
         "resource_type"
     )
 
-    if not secure_url:
-        raise RuntimeError(
-            "Verified Cloudinary asset has no secure URL."
-        )
-
     if not isinstance(
         secure_url,
         str,
@@ -1370,7 +1200,7 @@ def verify_recording(
         "https://"
     ):
         raise RuntimeError(
-            "Verified Cloudinary asset returned an invalid URL."
+            "Verified Cloudinary asset has an invalid URL."
         )
 
     if resource_type != "video":
@@ -1378,11 +1208,11 @@ def verify_recording(
             "Verified Cloudinary asset is not a video."
         )
 
-    transaction = _get_transaction()
-
     recording_document = _get_recording_document(
         recording_id
     )
+
+    transaction = _get_transaction()
 
     snapshot = transaction.get(
         recording_document
@@ -1395,68 +1225,48 @@ def verify_recording(
 
     data = snapshot.to_dict()
 
-    if not isinstance(
-        data,
-        dict,
-    ):
+    if not isinstance(data, dict):
         raise RuntimeError(
             "Stored recording data is invalid."
         )
 
-    stored_recording = Recording.from_dict(
-        data
-    )
+    stored = Recording.from_dict(data)
 
     _validate_recording_ownership(
-        stored_recording,
+        stored,
         session,
     )
 
-    if stored_recording.status == STATUS_VERIFIED:
-        return stored_recording
+    if stored.status == STATUS_VERIFIED:
+        return stored
 
-    if stored_recording.status != STATUS_UPLOADED:
+    if stored.status != STATUS_UPLOADED:
         raise ValueError(
-            "The recording is no longer in an uploadable verification state."
+            "Recording is no longer awaiting verification."
         )
 
     now = utc_now_iso()
 
-    stored_recording.secure_url = secure_url
-    stored_recording.resource_type = resource_type
-    stored_recording.status = STATUS_VERIFIED
-    stored_recording.completed_at = now
-    stored_recording.updated_at = now
-    stored_recording.version += 1
+    stored.secure_url = secure_url
+    stored.resource_type = resource_type
+    stored.status = STATUS_VERIFIED
+    stored.completed_at = now
+    stored.updated_at = now
+    stored.version += 1
 
     transaction.update(
         recording_document,
-        stored_recording.to_dict(),
+        stored.to_dict(),
     )
 
     transaction.commit()
 
-    recording.secure_url = (
-        stored_recording.secure_url
+    _update_recording_after_transaction(
+        recording,
+        stored,
     )
-    recording.resource_type = (
-        stored_recording.resource_type
-    )
-    recording.status = stored_recording.status
-    recording.completed_at = (
-        stored_recording.completed_at
-    )
-    recording.updated_at = (
-        stored_recording.updated_at
-    )
-    recording.version = stored_recording.version
 
-    # Video 1 has a dedicated verified state.
-    if (
-        recording.recording_type
-        == RECORDING_TYPE_VIDEO_1
-    ):
-        from services.quest_service import get_quest
+    if recording.recording_type == RECORDING_TYPE_VIDEO_1:
 
         quest = get_quest(
             session.session_id
@@ -1494,25 +1304,14 @@ def mark_recording_failed(
     *,
     reason: str = "Recording operation failed.",
 ) -> Recording:
-    """
-    Mark a recording as failed.
 
-    Failure information is kept in metadata without exposing
-    internal exception details to the frontend.
-    """
+    _validate_session(session)
 
-    _validate_session(
-        session
-    )
-
-    recording_id = validate_recording_identifier(
+    recording_id = _validate_recording_id(
         recording_id
     )
 
-    if not isinstance(
-        reason,
-        str,
-    ):
+    if not isinstance(reason, str):
         raise TypeError(
             "reason must be a string."
         )
@@ -1522,8 +1321,8 @@ def mark_recording_failed(
     if not reason:
         reason = "Recording operation failed."
 
-    if len(reason) > 512:
-        reason = reason[:512]
+    # Never store an excessively large error string.
+    reason = reason[:512]
 
     recording = _get_recording(
         recording_id
@@ -1542,11 +1341,11 @@ def mark_recording_failed(
     if recording.status == STATUS_VERIFIED:
         return recording
 
-    transaction = _get_transaction()
-
     recording_document = _get_recording_document(
         recording_id
     )
+
+    transaction = _get_transaction()
 
     snapshot = transaction.get(
         recording_document
@@ -1559,52 +1358,43 @@ def mark_recording_failed(
 
     data = snapshot.to_dict()
 
-    if not isinstance(
-        data,
-        dict,
-    ):
+    if not isinstance(data, dict):
         raise RuntimeError(
             "Stored recording data is invalid."
         )
 
-    stored_recording = Recording.from_dict(
-        data
-    )
+    stored = Recording.from_dict(data)
 
     _validate_recording_ownership(
-        stored_recording,
+        stored,
         session,
     )
 
-    if stored_recording.status == STATUS_VERIFIED:
-        return stored_recording
-
-    now = utc_now_iso()
+    if stored.status == STATUS_VERIFIED:
+        return stored
 
     metadata = dict(
-        stored_recording.metadata
+        stored.metadata
     )
 
     metadata["failure_reason"] = reason
 
-    stored_recording.metadata = metadata
-    stored_recording.status = STATUS_FAILED
-    stored_recording.updated_at = now
-    stored_recording.version += 1
+    stored.metadata = metadata
+    stored.status = STATUS_FAILED
+    stored.updated_at = utc_now_iso()
+    stored.version += 1
 
     transaction.update(
         recording_document,
-        stored_recording.to_dict(),
+        stored.to_dict(),
     )
 
     transaction.commit()
 
-    recording.metadata = dict(
-        stored_recording.metadata
+    _update_recording_after_transaction(
+        recording,
+        stored,
     )
-    recording.status = stored_recording.status
-    recording.updated_at = stored_recording.updated_at
-    recording.version = stored_recording.version
 
     log_warning(
         logger,
@@ -1617,23 +1407,17 @@ def mark_recording_failed(
 
 
 # ============================================================
-# RECORDING RETRIEVAL
+# RETRIEVAL
 # ============================================================
 
 def get_recording(
     session: Session,
     recording_id: str,
 ) -> Recording | None:
-    """
-    Retrieve a recording only if it belongs to the supplied
-    session.
-    """
 
-    _validate_session(
-        session
-    )
+    _validate_session(session)
 
-    recording_id = validate_recording_identifier(
+    recording_id = _validate_recording_id(
         recording_id
     )
 
@@ -1653,17 +1437,14 @@ def get_recording(
 
 
 # ============================================================
-# RECORDING TYPE HELPERS
+# TYPE HELPERS
 # ============================================================
 
 def is_video_1(
     recording: Recording,
 ) -> bool:
     return (
-        isinstance(
-            recording,
-            Recording,
-        )
+        isinstance(recording, Recording)
         and recording.recording_type
         == RECORDING_TYPE_VIDEO_1
     )
@@ -1673,10 +1454,7 @@ def is_video_2(
     recording: Recording,
 ) -> bool:
     return (
-        isinstance(
-            recording,
-            Recording,
-        )
+        isinstance(recording, Recording)
         and recording.recording_type
         == RECORDING_TYPE_VIDEO_2
     )
@@ -1686,40 +1464,19 @@ def is_reaction(
     recording: Recording,
 ) -> bool:
     return (
-        isinstance(
-            recording,
-            Recording,
-        )
+        isinstance(recording, Recording)
         and recording.recording_type
         == RECORDING_TYPE_REACTION
     )
 
 
-# ============================================================
-# COMPLETION CHECK
-# ============================================================
-
 def is_verified(
     recording: Recording,
 ) -> bool:
-    """
-    Return whether the recording has completed the permanent
-    Cloudinary verification lifecycle.
-    """
-
     return (
-        isinstance(
-            recording,
-            Recording,
-        )
-        and recording.status
-        == STATUS_VERIFIED
-        and bool(
-            recording.cloudinary_public_id
-        )
-        and bool(
-            recording.secure_url
-        )
-        and recording.resource_type
-        == "video"
-)
+        isinstance(recording, Recording)
+        and recording.status == STATUS_VERIFIED
+        and bool(recording.cloudinary_public_id)
+        and bool(recording.secure_url)
+        and recording.resource_type == "video"
+            )
