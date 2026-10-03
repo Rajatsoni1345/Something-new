@@ -11,6 +11,13 @@ Storage architecture:
 
 This service only handles session data. It does not upload or
 store video files.
+
+IMPORTANT:
+- All read-modify-write session operations use Firestore
+  transactions.
+- Session versions provide optimistic concurrency protection.
+- Session IDs are generated server-side.
+- A completed session becomes permanently inactive.
 """
 
 from __future__ import annotations
@@ -20,9 +27,10 @@ from typing import Any
 from models.session import Session
 
 from services.firebase_service import (
-    get_firestore_client,
+    create_transaction,
     get_document,
     get_document_data,
+    run_transaction,
 )
 
 from utils.ids import generate_session_id
@@ -79,6 +87,36 @@ def _validate_session(
         )
 
 
+def _validate_session_id(
+    session_id: str,
+) -> str:
+    """
+    Validate a session ID before using it in Firestore.
+    """
+
+    if not isinstance(
+        session_id,
+        str,
+    ):
+        raise TypeError(
+            "session_id must be a string."
+        )
+
+    session_id = session_id.strip()
+
+    if not session_id:
+        raise ValueError(
+            "session_id cannot be empty."
+        )
+
+    if "/" in session_id:
+        raise ValueError(
+            "session_id cannot contain '/'."
+        )
+
+    return session_id
+
+
 def _validate_new_state(
     new_state: str,
 ) -> str:
@@ -116,23 +154,41 @@ def _get_session_document(
     Return the Firestore document reference for a session.
     """
 
+    session_id = _validate_session_id(
+        session_id
+    )
+
     return get_document(
         SESSIONS_COLLECTION,
         session_id,
     )
 
 
-def _get_transaction():
+def _read_session_from_snapshot(
+    snapshot,
+) -> Session:
     """
-    Create a fresh Firestore transaction.
-
-    The transaction is used only for atomic session
-    read-modify-write operations.
+    Convert a Firestore document snapshot into a Session model.
     """
 
-    client = get_firestore_client()
+    if not snapshot.exists:
+        raise ValueError(
+            "Session no longer exists."
+        )
 
-    return client.transaction()
+    data = snapshot.to_dict()
+
+    if not isinstance(
+        data,
+        dict,
+    ):
+        raise RuntimeError(
+            "Stored session data is invalid."
+        )
+
+    return Session.from_dict(
+        data
+    )
 
 
 # ============================================================
@@ -147,8 +203,11 @@ def create_session(
 
     A UUID v4 session ID is generated server-side.
 
-    The document is created transactionally so an existing
-    document can never be silently overwritten.
+    Firestore transaction creation guarantees that an existing
+    document cannot be silently overwritten.
+
+    In the extremely unlikely event of a generated-ID collision,
+    a new ID is generated and the operation is retried.
     """
 
     if metadata is None:
@@ -162,53 +221,101 @@ def create_session(
             "metadata must be a dictionary."
         )
 
-    session_id = generate_session_id()
-
-    now = utc_now_iso()
-
-    session = Session(
-        session_id=session_id,
-        state=INITIAL_SESSION_STATE,
-        created_at=now,
-        updated_at=now,
-        last_activity_at=now,
-        completed_at=None,
-        version=1,
-        active=True,
-        metadata=dict(metadata),
+    metadata_copy = dict(
+        metadata
     )
 
-    document = _get_session_document(
-        session.session_id
-    )
+    # --------------------------------------------------------
+    # UUID collision retry.
+    #
+    # UUID v4 collisions are extraordinarily unlikely, but the
+    # service still handles the condition explicitly rather than
+    # overwriting an existing session.
+    # --------------------------------------------------------
 
-    transaction = _get_transaction()
+    max_attempts = 3
 
-    snapshot = transaction.get(
-        document
-    )
+    for attempt in range(
+        1,
+        max_attempts + 1,
+    ):
+        session_id = generate_session_id()
 
-    if snapshot.exists:
-        raise RuntimeError(
-            "A generated session identifier already exists. "
-            "Please retry session creation."
+        now = utc_now_iso()
+
+        session = Session(
+            session_id=session_id,
+            state=INITIAL_SESSION_STATE,
+            created_at=now,
+            updated_at=now,
+            last_activity_at=now,
+            completed_at=None,
+            version=1,
+            active=True,
+            metadata=metadata_copy,
         )
 
-    transaction.create(
-        document,
-        session.to_dict(),
+        document = _get_session_document(
+            session.session_id
+        )
+
+        def create_operation(
+            transaction,
+        ):
+            snapshot = transaction.get(
+                document
+            )
+
+            if snapshot.exists:
+                raise RuntimeError(
+                    "SESSION_ID_COLLISION"
+                )
+
+            transaction.create(
+                document,
+                session.to_dict(),
+            )
+
+            return session
+
+        try:
+            created_session = run_transaction(
+                create_operation
+            )
+
+        except RuntimeError as exc:
+            if (
+                str(exc) == "SESSION_ID_COLLISION"
+                and attempt < max_attempts
+            ):
+                log_warning(
+                    logger,
+                    "session_id_collision",
+                    attempt=attempt,
+                )
+                continue
+
+            if (
+                str(exc) == "SESSION_ID_COLLISION"
+            ):
+                raise RuntimeError(
+                    "Unable to generate a unique session identifier."
+                ) from exc
+
+            raise
+
+        log_info(
+            logger,
+            "session_created",
+            session_id=created_session.session_id,
+            state=created_session.state,
+        )
+
+        return created_session
+
+    raise RuntimeError(
+        "Unable to create a unique session."
     )
-
-    transaction.commit()
-
-    log_info(
-        logger,
-        "session_created",
-        session_id=session.session_id,
-        state=session.state,
-    )
-
-    return session
 
 
 # ============================================================
@@ -223,6 +330,10 @@ def get_session(
 
     Returns None when the session does not exist.
     """
+
+    session_id = _validate_session_id(
+        session_id
+    )
 
     data = get_document_data(
         SESSIONS_COLLECTION,
@@ -252,83 +363,105 @@ def recover_session(
     A completed or inactive session cannot be recovered.
     """
 
+    session_id = _validate_session_id(
+        session_id
+    )
+
     document = _get_session_document(
         session_id
     )
 
-    transaction = _get_transaction()
-
-    snapshot = transaction.get(
-        document
-    )
-
-    if not snapshot.exists:
-        log_warning(
-            logger,
-            "session_not_found",
-            session_id=session_id,
-        )
-        return None
-
-    data = snapshot.to_dict()
-
-    if not isinstance(
-        data,
-        dict,
+    def recovery_operation(
+        transaction,
     ):
-        raise RuntimeError(
-            "Stored session data is invalid."
+        snapshot = transaction.get(
+            document
         )
 
-    session = Session.from_dict(
-        data
+        if not snapshot.exists:
+            return None
+
+        session = _read_session_from_snapshot(
+            snapshot
+        )
+
+        if not session.active:
+            return None
+
+        if session.state == COMPLETED_SESSION_STATE:
+            return None
+
+        now = utc_now_iso()
+
+        next_version = (
+            session.version + 1
+        )
+
+        transaction.update(
+            document,
+            {
+                "updated_at": now,
+                "last_activity_at": now,
+                "version": next_version,
+            },
+        )
+
+        session.updated_at = now
+        session.last_activity_at = now
+        session.version = next_version
+
+        return session
+
+    recovered_session = run_transaction(
+        recovery_operation
     )
 
-    if not session.active:
-        log_warning(
-            logger,
-            "inactive_session_recovery_attempt",
-            session_id=session.session_id,
-            state=session.state,
+    if recovered_session is None:
+        existing_session = get_session(
+            session_id
         )
+
+        if existing_session is None:
+            log_warning(
+                logger,
+                "session_not_found",
+                session_id=session_id,
+            )
+            return None
+
+        if not existing_session.active:
+            log_warning(
+                logger,
+                "inactive_session_recovery_attempt",
+                session_id=existing_session.session_id,
+                state=existing_session.state,
+            )
+            return None
+
+        if (
+            existing_session.state
+            == COMPLETED_SESSION_STATE
+        ):
+            log_warning(
+                logger,
+                "completed_session_recovery_attempt",
+                session_id=existing_session.session_id,
+            )
+            return None
+
+        # This should only be reachable if the document changed
+        # between transaction behavior and the follow-up read.
         return None
-
-    if session.state == COMPLETED_SESSION_STATE:
-        log_warning(
-            logger,
-            "completed_session_recovery_attempt",
-            session_id=session.session_id,
-        )
-        return None
-
-    now = utc_now_iso()
-
-    next_version = session.version + 1
-
-    transaction.update(
-        document,
-        {
-            "updated_at": now,
-            "last_activity_at": now,
-            "version": next_version,
-        },
-    )
-
-    transaction.commit()
-
-    session.updated_at = now
-    session.last_activity_at = now
-    session.version = next_version
 
     log_info(
         logger,
         "session_recovered",
-        session_id=session.session_id,
-        state=session.state,
-        version=session.version,
+        session_id=recovered_session.session_id,
+        state=recovered_session.state,
+        version=recovered_session.version,
     )
 
-    return session
+    return recovered_session
 
 
 # ============================================================
@@ -342,7 +475,7 @@ def update_session_activity(
     Atomically update session activity and increment its version.
 
     The persisted version must match the supplied Session version.
-    This prevents a stale session object from overwriting newer
+    This prevents a stale Session object from overwriting newer
     session data.
     """
 
@@ -364,65 +497,75 @@ def update_session_activity(
         session.session_id
     )
 
-    transaction = _get_transaction()
-
-    snapshot = transaction.get(
-        document
-    )
-
-    if not snapshot.exists:
-        raise ValueError(
-            "Session no longer exists."
-        )
-
-    data = snapshot.to_dict()
-
-    if not isinstance(
-        data,
-        dict,
+    def activity_operation(
+        transaction,
     ):
-        raise RuntimeError(
-            "Stored session data is invalid."
+        snapshot = transaction.get(
+            document
         )
 
-    persisted_session = Session.from_dict(
-        data
+        persisted_session = (
+            _read_session_from_snapshot(
+                snapshot
+            )
+        )
+
+        if (
+            persisted_session.version
+            != session.version
+        ):
+            raise RuntimeError(
+                "Session version conflict. "
+                "The session was modified by another request."
+            )
+
+        if not persisted_session.active:
+            raise ValueError(
+                "The session is inactive."
+            )
+
+        if (
+            persisted_session.state
+            == COMPLETED_SESSION_STATE
+        ):
+            raise ValueError(
+                "The session is already complete."
+            )
+
+        now = utc_now_iso()
+
+        next_version = (
+            persisted_session.version + 1
+        )
+
+        transaction.update(
+            document,
+            {
+                "updated_at": now,
+                "last_activity_at": now,
+                "version": next_version,
+            },
+        )
+
+        persisted_session.updated_at = now
+        persisted_session.last_activity_at = now
+        persisted_session.version = next_version
+
+        return persisted_session
+
+    updated_session = run_transaction(
+        activity_operation
     )
 
-    if persisted_session.version != session.version:
-        raise RuntimeError(
-            "Session version conflict. "
-            "The session was modified by another request."
-        )
-
-    if not persisted_session.active:
-        raise ValueError(
-            "The session is inactive."
-        )
-
-    if persisted_session.state == COMPLETED_SESSION_STATE:
-        raise ValueError(
-            "The session is already complete."
-        )
-
-    now = utc_now_iso()
-
-    next_version = persisted_session.version + 1
-
-    transaction.update(
-        document,
-        {
-            "updated_at": now,
-            "last_activity_at": now,
-            "version": next_version,
-        },
+    session.updated_at = (
+        updated_session.updated_at
     )
-
-    transaction.commit()
-
-    session.updated_at = now
-    session.last_activity_at = now
-    session.version = next_version
+    session.last_activity_at = (
+        updated_session.last_activity_at
+    )
+    session.version = (
+        updated_session.version
+    )
 
     return session
 
@@ -465,67 +608,80 @@ def update_session_state(
         session.session_id
     )
 
-    transaction = _get_transaction()
-
-    snapshot = transaction.get(
-        document
-    )
-
-    if not snapshot.exists:
-        raise ValueError(
-            "Session no longer exists."
-        )
-
-    data = snapshot.to_dict()
-
-    if not isinstance(
-        data,
-        dict,
+    def state_operation(
+        transaction,
     ):
-        raise RuntimeError(
-            "Stored session data is invalid."
+        snapshot = transaction.get(
+            document
         )
 
-    persisted_session = Session.from_dict(
-        data
+        persisted_session = (
+            _read_session_from_snapshot(
+                snapshot
+            )
+        )
+
+        if (
+            persisted_session.version
+            != session.version
+        ):
+            raise RuntimeError(
+                "Session version conflict. "
+                "The session was modified by another request."
+            )
+
+        if not persisted_session.active:
+            raise ValueError(
+                "The session is inactive."
+            )
+
+        if (
+            persisted_session.state
+            == COMPLETED_SESSION_STATE
+        ):
+            raise ValueError(
+                "A completed session cannot change state."
+            )
+
+        now = utc_now_iso()
+
+        next_version = (
+            persisted_session.version + 1
+        )
+
+        transaction.update(
+            document,
+            {
+                "state": new_state,
+                "updated_at": now,
+                "last_activity_at": now,
+                "version": next_version,
+            },
+        )
+
+        persisted_session.state = new_state
+        persisted_session.updated_at = now
+        persisted_session.last_activity_at = now
+        persisted_session.version = next_version
+
+        return persisted_session
+
+    updated_session = run_transaction(
+        state_operation
     )
 
-    if persisted_session.version != session.version:
-        raise RuntimeError(
-            "Session version conflict. "
-            "The session was modified by another request."
-        )
-
-    if not persisted_session.active:
-        raise ValueError(
-            "The session is inactive."
-        )
-
-    if persisted_session.state == COMPLETED_SESSION_STATE:
-        raise ValueError(
-            "A completed session cannot change state."
-        )
-
-    now = utc_now_iso()
-
-    next_version = persisted_session.version + 1
-
-    transaction.update(
-        document,
-        {
-            "state": new_state,
-            "updated_at": now,
-            "last_activity_at": now,
-            "version": next_version,
-        },
+    session.state = (
+        updated_session.state
     )
-
-    transaction.commit()
-
-    session.state = new_state
-    session.updated_at = now
-    session.last_activity_at = now
-    session.version = next_version
+    session.updated_at = (
+        updated_session.updated_at
+    )
+    session.last_activity_at = (
+        updated_session.last_activity_at
+    )
+    session.version = (
+        updated_session.version
+    )
 
     return session
 
@@ -540,8 +696,12 @@ def complete_session(
     """
     Atomically mark a session as complete and inactive.
 
-    Calling this function on an already completed session is
-    idempotent and returns the supplied session.
+    Calling this function with an already-completed stored
+    session is idempotent.
+
+    A stale active Session object cannot overwrite a newer
+    session state because version validation occurs inside
+    the Firestore transaction.
     """
 
     _validate_session(
@@ -560,74 +720,104 @@ def complete_session(
         session.session_id
     )
 
-    transaction = _get_transaction()
-
-    snapshot = transaction.get(
-        document
-    )
-
-    if not snapshot.exists:
-        raise ValueError(
-            "Session no longer exists."
-        )
-
-    data = snapshot.to_dict()
-
-    if not isinstance(
-        data,
-        dict,
+    def completion_operation(
+        transaction,
     ):
-        raise RuntimeError(
-            "Stored session data is invalid."
+        snapshot = transaction.get(
+            document
         )
 
-    persisted_session = Session.from_dict(
-        data
-    )
-
-    if persisted_session.version != session.version:
-        raise RuntimeError(
-            "Session version conflict. "
-            "The session was modified by another request."
+        persisted_session = (
+            _read_session_from_snapshot(
+                snapshot
+            )
         )
 
-    if persisted_session.state == COMPLETED_SESSION_STATE:
+        # ----------------------------------------------------
+        # Idempotent completion.
+        #
+        # If another request completed the session before this
+        # transaction committed, simply return the persisted
+        # completed session.
+        # ----------------------------------------------------
+
+        if (
+            persisted_session.state
+            == COMPLETED_SESSION_STATE
+        ):
+            return persisted_session
+
+        if (
+            persisted_session.version
+            != session.version
+        ):
+            raise RuntimeError(
+                "Session version conflict. "
+                "The session was modified by another request."
+            )
+
+        if not persisted_session.active:
+            raise ValueError(
+                "Session is already inactive."
+            )
+
+        now = utc_now_iso()
+
+        next_version = (
+            persisted_session.version + 1
+        )
+
+        transaction.update(
+            document,
+            {
+                "state": COMPLETED_SESSION_STATE,
+                "active": False,
+                "completed_at": now,
+                "updated_at": now,
+                "last_activity_at": now,
+                "version": next_version,
+            },
+        )
+
+        persisted_session.state = (
+            COMPLETED_SESSION_STATE
+        )
+        persisted_session.active = False
+        persisted_session.completed_at = now
+        persisted_session.updated_at = now
+        persisted_session.last_activity_at = now
+        persisted_session.version = next_version
+
         return persisted_session
 
-    if not persisted_session.active:
-        raise ValueError(
-            "Session is already inactive."
-        )
-
-    now = utc_now_iso()
-
-    next_version = persisted_session.version + 1
-
-    transaction.update(
-        document,
-        {
-            "state": COMPLETED_SESSION_STATE,
-            "active": False,
-            "completed_at": now,
-            "updated_at": now,
-            "last_activity_at": now,
-            "version": next_version,
-        },
+    completed_session = run_transaction(
+        completion_operation
     )
 
-    transaction.commit()
-
-    session.state = COMPLETED_SESSION_STATE
-    session.active = False
-    session.completed_at = now
-    session.updated_at = now
-    session.last_activity_at = now
-    session.version = next_version
+    session.state = (
+        completed_session.state
+    )
+    session.active = (
+        completed_session.active
+    )
+    session.completed_at = (
+        completed_session.completed_at
+    )
+    session.updated_at = (
+        completed_session.updated_at
+    )
+    session.last_activity_at = (
+        completed_session.last_activity_at
+    )
+    session.version = (
+        completed_session.version
+    )
 
     log_info(
         logger,
         "session_completed",
         session_id=session.session_id,
+        version=session.version,
     )
 
     return session
