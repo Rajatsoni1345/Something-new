@@ -7,42 +7,50 @@ IMPORTANT:
 - The client cannot directly choose the next quest state.
 - Every transition must be explicitly allowed.
 - Level progression is validated server-side.
+- Hidden words are validated server-side.
 - Quest data is persisted through the Firebase service.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 from models.quest import Quest
 from models.session import Session
+
 from services.firebase_service import (
     get_document_data,
     set_document_data,
     update_document_data,
 )
-from services.session_service import (
-    update_session_state,
-)
+
+from services.session_service import update_session_state
+
 from utils.logging import (
     get_logger,
     log_info,
     log_warning,
 )
+
 from utils.timestamps import utc_now_iso
 
 
 logger = get_logger(__name__)
 
+
+# ============================================================
+# FIRESTORE
+# ============================================================
+
 QUESTS_COLLECTION = "quests"
 
 
-# ------------------------------------------------------------------
+# ============================================================
 # QUEST STATES
-# ------------------------------------------------------------------
+# ============================================================
 
 STATE_NEW = "NEW"
+
 STATE_INTRO_COMPLETE = "INTRO_COMPLETE"
 STATE_GATE_ENTERED = "GATE_ENTERED"
 STATE_MAGIC_VERIFIED = "MAGIC_VERIFIED"
@@ -72,25 +80,30 @@ STATE_LEVEL_4_COMPLETE = "LEVEL_4_COMPLETE"
 STATE_FINAL_REVEAL = "FINAL_REVEAL"
 STATE_FINAL_VIDEO_STARTED = "FINAL_VIDEO_STARTED"
 STATE_FINAL_VIDEO_COMPLETED = "FINAL_VIDEO_COMPLETED"
+
 STATE_REACTION_RECORDING = "REACTION_RECORDING"
 STATE_REACTION_UPLOAD = "REACTION_UPLOAD"
 
 STATE_SESSION_COMPLETE = "SESSION_COMPLETE"
 
 
-# ------------------------------------------------------------------
+# ============================================================
 # LEVEL CONFIGURATION
-# ------------------------------------------------------------------
+# ============================================================
 
 LEVEL_STATES = {
     1: STATE_LEVEL_1_COMPLETE,
     2: STATE_LEVEL_2_COMPLETE,
     3: STATE_LEVEL_3_COMPLETE,
     4: STATE_LEVEL_4_COMPLETE,
-    5: STATE_FINAL_REVEAL,
 }
 
 
+# These are temporary server-side placeholders.
+#
+# IMPORTANT:
+# Actual hidden words will be finalized later as quest content.
+# The frontend must never be treated as the authority for these.
 LEVEL_HIDDEN_WORDS = {
     1: "LEVEL_ONE_WORD",
     2: "LEVEL_TWO_WORD",
@@ -99,9 +112,22 @@ LEVEL_HIDDEN_WORDS = {
 }
 
 
-# ------------------------------------------------------------------
-# LEGAL STATE TRANSITIONS
-# ------------------------------------------------------------------
+# ============================================================
+# COLLECTIBLES
+# ============================================================
+
+ALLOWED_ITEMS = frozenset(
+    {
+        "owl",
+        "wand",
+        "broom",
+    }
+)
+
+
+# ============================================================
+# STATE MACHINE
+# ============================================================
 
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     STATE_NEW: frozenset(
@@ -109,152 +135,221 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
             STATE_INTRO_COMPLETE,
         }
     ),
+
     STATE_INTRO_COMPLETE: frozenset(
         {
             STATE_GATE_ENTERED,
         }
     ),
+
     STATE_GATE_ENTERED: frozenset(
         {
             STATE_MAGIC_VERIFIED,
         }
     ),
+
     STATE_MAGIC_VERIFIED: frozenset(
         {
             STATE_BIRTHDAY_SCENE,
         }
     ),
+
     STATE_BIRTHDAY_SCENE: frozenset(
         {
             STATE_VIDEO_1_RECORDING,
         }
     ),
+
     STATE_VIDEO_1_RECORDING: frozenset(
         {
             STATE_CANDLE_TRIGGERED,
         }
     ),
+
     STATE_CANDLE_TRIGGERED: frozenset(
         {
             STATE_VIDEO_1_STOPPING,
         }
     ),
+
     STATE_VIDEO_1_STOPPING: frozenset(
         {
             STATE_VIDEO_1_UPLOAD_PENDING,
         }
     ),
+
     STATE_VIDEO_1_UPLOAD_PENDING: frozenset(
         {
             STATE_VIDEO_1_UPLOADED,
         }
     ),
+
     STATE_VIDEO_1_UPLOADED: frozenset(
         {
             STATE_VIDEO_1_VERIFIED,
         }
     ),
+
     STATE_VIDEO_1_VERIFIED: frozenset(
         {
             STATE_VIDEO_2_READY,
         }
     ),
+
     STATE_VIDEO_2_READY: frozenset(
         {
             STATE_VIDEO_2_RECORDING,
         }
     ),
+
     STATE_VIDEO_2_RECORDING: frozenset(
         {
             STATE_WALL_UNLOCKED,
         }
     ),
+
     STATE_WALL_UNLOCKED: frozenset(
         {
             STATE_COLLECTIBLES_COMPLETE,
         }
     ),
+
     STATE_COLLECTIBLES_COMPLETE: frozenset(
         {
             STATE_TICKET_COLLECTED,
         }
     ),
+
     STATE_TICKET_COLLECTED: frozenset(
         {
             STATE_TRAIN_COMPLETE,
         }
     ),
+
     STATE_TRAIN_COMPLETE: frozenset(
         {
             STATE_SORTING_COMPLETE,
         }
     ),
+
     STATE_SORTING_COMPLETE: frozenset(
         {
             STATE_LEVEL_1_COMPLETE,
         }
     ),
+
     STATE_LEVEL_1_COMPLETE: frozenset(
         {
             STATE_LEVEL_2_COMPLETE,
         }
     ),
+
     STATE_LEVEL_2_COMPLETE: frozenset(
         {
             STATE_LEVEL_3_COMPLETE,
         }
     ),
+
     STATE_LEVEL_3_COMPLETE: frozenset(
         {
             STATE_LEVEL_4_COMPLETE,
         }
     ),
+
     STATE_LEVEL_4_COMPLETE: frozenset(
         {
             STATE_FINAL_REVEAL,
         }
     ),
+
     STATE_FINAL_REVEAL: frozenset(
         {
             STATE_FINAL_VIDEO_STARTED,
         }
     ),
+
     STATE_FINAL_VIDEO_STARTED: frozenset(
         {
             STATE_FINAL_VIDEO_COMPLETED,
         }
     ),
+
     STATE_FINAL_VIDEO_COMPLETED: frozenset(
         {
             STATE_REACTION_RECORDING,
         }
     ),
+
     STATE_REACTION_RECORDING: frozenset(
         {
             STATE_REACTION_UPLOAD,
         }
     ),
+
     STATE_REACTION_UPLOAD: frozenset(
         {
             STATE_SESSION_COMPLETE,
         }
     ),
+
     STATE_SESSION_COMPLETE: frozenset(),
 }
 
 
-def create_quest(
-    session: Session,
-) -> Quest:
-    """
-    Create and persist the initial quest state for a session.
-    """
+# ============================================================
+# INTERNAL VALIDATION
+# ============================================================
+
+def _validate_session(session: Session) -> None:
     if not isinstance(session, Session):
         raise TypeError(
             "session must be a Session instance."
         )
 
-    existing = get_quest(session.session_id)
+    if not session.active:
+        raise ValueError(
+            "The session is inactive."
+        )
+
+    if session.state == STATE_SESSION_COMPLETE:
+        raise ValueError(
+            "The session is already complete."
+        )
+
+
+def _validate_quest(
+    session: Session,
+    quest: Quest,
+) -> None:
+    if not isinstance(quest, Quest):
+        raise TypeError(
+            "quest must be a Quest instance."
+        )
+
+    if quest.session_id != session.session_id:
+        raise ValueError(
+            "Session and quest do not belong together."
+        )
+
+
+# ============================================================
+# QUEST CREATION / RETRIEVAL
+# ============================================================
+
+def create_quest(
+    session: Session,
+) -> Quest:
+    """
+    Create a new quest for a session.
+
+    If a quest already exists, the existing quest is returned.
+    """
+
+    _validate_session(session)
+
+    existing = get_quest(
+        session.session_id
+    )
 
     if existing is not None:
         return existing
@@ -293,8 +388,9 @@ def get_quest(
     session_id: str,
 ) -> Quest | None:
     """
-    Retrieve quest state for a session.
+    Retrieve a quest by session ID.
     """
+
     data = get_document_data(
         QUESTS_COLLECTION,
         session_id,
@@ -310,9 +406,14 @@ def get_or_create_quest(
     session: Session,
 ) -> Quest:
     """
-    Retrieve an existing quest or create its initial state.
+    Return an existing quest or create one.
     """
-    existing = get_quest(session.session_id)
+
+    _validate_session(session)
+
+    existing = get_quest(
+        session.session_id
+    )
 
     if existing is not None:
         return existing
@@ -320,13 +421,18 @@ def get_or_create_quest(
     return create_quest(session)
 
 
+# ============================================================
+# STATE TRANSITIONS
+# ============================================================
+
 def can_transition(
     current_state: str,
     next_state: str,
 ) -> bool:
     """
-    Return whether a state transition is explicitly allowed.
+    Return True when the requested state transition is legal.
     """
+
     allowed_states = ALLOWED_TRANSITIONS.get(
         current_state,
         frozenset(),
@@ -343,22 +449,14 @@ def transition_quest(
     """
     Perform one validated quest state transition.
 
-    The session state is updated together with the quest state.
+    The client cannot freely choose an arbitrary state.
     """
-    if not isinstance(session, Session):
-        raise TypeError(
-            "session must be a Session instance."
-        )
 
-    if not isinstance(quest, Quest):
-        raise TypeError(
-            "quest must be a Quest instance."
-        )
-
-    if quest.session_id != session.session_id:
-        raise ValueError(
-            "Session and quest do not belong together."
-        )
+    _validate_session(session)
+    _validate_quest(
+        session,
+        quest,
+    )
 
     if not isinstance(next_state, str):
         raise TypeError(
@@ -391,7 +489,6 @@ def transition_quest(
             f"{previous_state} -> {next_state}"
         )
 
-    now = utc_now_iso()
     next_version = quest.version + 1
 
     update_document_data(
@@ -417,11 +514,14 @@ def transition_quest(
         session_id=session.session_id,
         previous_state=previous_state,
         next_state=next_state,
-        timestamp=now,
     )
 
     return quest
 
+
+# ============================================================
+# LEVEL PROGRESSION
+# ============================================================
 
 def complete_level(
     session: Session,
@@ -429,14 +529,27 @@ def complete_level(
     level: int,
 ) -> Quest:
     """
-    Complete exactly one quest level.
+    Complete one of the four normal quest levels.
 
-    The next level cannot be completed until the previous level
-    has been completed.
+    Level 5 is intentionally not accepted here.
+    Final Reveal has its own dedicated function.
     """
+
+    _validate_session(session)
+    _validate_quest(
+        session,
+        quest,
+    )
+
+    if isinstance(level, bool) or not isinstance(level, int):
+        raise TypeError(
+            "level must be an integer."
+        )
+
     if level not in LEVEL_STATES:
         raise ValueError(
-            "Invalid quest level."
+            "Invalid quest level. "
+            "Only levels 1 through 4 are valid."
         )
 
     expected_current_level = level - 1
@@ -458,36 +571,37 @@ def complete_level(
         next_state,
     ):
         raise ValueError(
-            f"Quest state does not allow completion "
-            f"of level {level}."
+            f"Quest state does not allow "
+            f"completion of level {level}."
         )
 
     completed_levels = list(
         quest.completed_levels
     )
+
     completed_levels.append(level)
 
     completed_levels = sorted(
         set(completed_levels)
     )
 
-    next_level = level
+    next_version = quest.version + 1
 
     update_document_data(
         QUESTS_COLLECTION,
         quest.session_id,
         {
             "state": next_state,
-            "current_level": next_level,
+            "current_level": level,
             "completed_levels": completed_levels,
-            "version": quest.version + 1,
+            "version": next_version,
         },
     )
 
     quest.state = next_state
-    quest.current_level = next_level
+    quest.current_level = level
     quest.completed_levels = completed_levels
-    quest.version += 1
+    quest.version = next_version
 
     update_session_state(
         session,
@@ -505,15 +619,27 @@ def complete_level(
     return quest
 
 
+# ============================================================
+# COLLECTIBLES
+# ============================================================
+
 def collect_item(
     session: Session,
     quest: Quest,
     item_id: str,
 ) -> Quest:
     """
-    Register a quest item after the current quest state has
-    unlocked item collection.
+    Collect one of the three magical quest items.
+
+    The quest advances automatically after all three are collected.
     """
+
+    _validate_session(session)
+    _validate_quest(
+        session,
+        quest,
+    )
+
     if quest.state != STATE_WALL_UNLOCKED:
         raise ValueError(
             "Collectibles are not currently available."
@@ -524,42 +650,41 @@ def collect_item(
             "item_id must be a string."
         )
 
-    item_id = item_id.strip()
+    item_id = item_id.strip().casefold()
 
     if not item_id:
         raise ValueError(
             "item_id cannot be empty."
         )
 
-    if item_id in quest.collected_items:
-        return quest
-
-    allowed_items = {
-        "owl",
-        "wand",
-        "broom",
-    }
-
-    if item_id not in allowed_items:
+    if item_id not in ALLOWED_ITEMS:
         raise ValueError(
             "Unknown quest item."
         )
 
+    if item_id in quest.collected_items:
+        return quest
+
     collected_items = list(
         quest.collected_items
     )
-    collected_items.append(item_id)
+
+    collected_items.append(
+        item_id
+    )
 
     collected_items = sorted(
         set(collected_items)
     )
 
-    next_state = quest.state
-
-    if allowed_items.issubset(
+    if ALLOWED_ITEMS.issubset(
         set(collected_items)
     ):
         next_state = STATE_COLLECTIBLES_COMPLETE
+    else:
+        next_state = STATE_WALL_UNLOCKED
+
+    next_version = quest.version + 1
 
     update_document_data(
         QUESTS_COLLECTION,
@@ -567,13 +692,13 @@ def collect_item(
         {
             "collected_items": collected_items,
             "state": next_state,
-            "version": quest.version + 1,
+            "version": next_version,
         },
     )
 
     quest.collected_items = collected_items
     quest.state = next_state
-    quest.version += 1
+    quest.version = next_version
 
     if next_state != session.state:
         update_session_state(
@@ -581,16 +706,35 @@ def collect_item(
             next_state,
         )
 
+    log_info(
+        logger,
+        "quest_item_collected",
+        session_id=session.session_id,
+        item_id=item_id,
+        items_collected=len(collected_items),
+    )
+
     return quest
 
+
+# ============================================================
+# RAILWAY TICKET
+# ============================================================
 
 def collect_ticket(
     session: Session,
     quest: Quest,
 ) -> Quest:
     """
-    Collect the railway ticket only when collectibles are complete.
+    Collect the railway ticket after all collectibles are complete.
     """
+
+    _validate_session(session)
+    _validate_quest(
+        session,
+        quest,
+    )
+
     if quest.state != STATE_COLLECTIBLES_COMPLETE:
         raise ValueError(
             "The railway ticket is not currently available."
@@ -600,6 +744,7 @@ def collect_ticket(
         return quest
 
     next_state = STATE_TICKET_COLLECTED
+    next_version = quest.version + 1
 
     update_document_data(
         QUESTS_COLLECTION,
@@ -607,30 +752,46 @@ def collect_ticket(
         {
             "collected_ticket": True,
             "state": next_state,
-            "version": quest.version + 1,
+            "version": next_version,
         },
     )
 
     quest.collected_ticket = True
     quest.state = next_state
-    quest.version += 1
+    quest.version = next_version
 
     update_session_state(
         session,
         next_state,
     )
 
+    log_info(
+        logger,
+        "ticket_collected",
+        session_id=session.session_id,
+    )
+
     return quest
 
+
+# ============================================================
+# TRAIN
+# ============================================================
 
 def complete_train(
     session: Session,
     quest: Quest,
 ) -> Quest:
     """
-    Complete the magical train sequence after the ticket has
-    been collected.
+    Complete the magical train sequence.
     """
+
+    _validate_session(session)
+    _validate_quest(
+        session,
+        quest,
+    )
+
     if quest.state != STATE_TICKET_COLLECTED:
         raise ValueError(
             "The train sequence is not currently available."
@@ -640,6 +801,7 @@ def complete_train(
         return quest
 
     next_state = STATE_TRAIN_COMPLETE
+    next_version = quest.version + 1
 
     update_document_data(
         QUESTS_COLLECTION,
@@ -647,55 +809,83 @@ def complete_train(
         {
             "train_completed": True,
             "state": next_state,
-            "version": quest.version + 1,
+            "version": next_version,
         },
     )
 
     quest.train_completed = True
     quest.state = next_state
-    quest.version += 1
+    quest.version = next_version
 
     update_session_state(
         session,
         next_state,
     )
 
+    log_info(
+        logger,
+        "train_completed",
+        session_id=session.session_id,
+    )
+
     return quest
 
+
+# ============================================================
+# SORTING
+# ============================================================
 
 def complete_sorting(
     session: Session,
     quest: Quest,
 ) -> Quest:
     """
-    Complete the magical sorting sequence after the train journey.
+    Complete the magical sorting sequence and unlock Level 1.
     """
+
+    _validate_session(session)
+    _validate_quest(
+        session,
+        quest,
+    )
+
     if quest.state != STATE_TRAIN_COMPLETE:
         raise ValueError(
             "Sorting is not currently available."
         )
 
     next_state = STATE_SORTING_COMPLETE
+    next_version = quest.version + 1
 
     update_document_data(
         QUESTS_COLLECTION,
         quest.session_id,
         {
             "state": next_state,
-            "version": quest.version + 1,
+            "version": next_version,
         },
     )
 
     quest.state = next_state
-    quest.version += 1
+    quest.version = next_version
 
     update_session_state(
         session,
         next_state,
     )
 
+    log_info(
+        logger,
+        "sorting_completed",
+        session_id=session.session_id,
+    )
+
     return quest
 
+
+# ============================================================
+# HIDDEN WORDS
+# ============================================================
 
 def discover_word(
     session: Session,
@@ -705,23 +895,15 @@ def discover_word(
     """
     Validate and record the next hidden quest word.
 
-    The client cannot invent arbitrary hidden words. The backend
-    determines which hidden word is expected next.
+    The client cannot invent arbitrary hidden words.
+    The backend determines which word is expected next.
     """
-    if not isinstance(session, Session):
-        raise TypeError(
-            "session must be a Session instance."
-        )
 
-    if not isinstance(quest, Quest):
-        raise TypeError(
-            "quest must be a Quest instance."
-        )
-
-    if quest.session_id != session.session_id:
-        raise ValueError(
-            "Session and quest do not belong together."
-        )
+    _validate_session(session)
+    _validate_quest(
+        session,
+        quest,
+    )
 
     if not isinstance(word, str):
         raise TypeError(
@@ -750,7 +932,8 @@ def discover_word(
 
     if expected_word is None:
         raise ValueError(
-            "No hidden word is configured for this progression step."
+            "No hidden word is configured "
+            "for this progression step."
         )
 
     expected_word = expected_word.casefold()
@@ -797,39 +980,30 @@ def discover_word(
 
     return quest
 
-    if len(quest.discovered_words) >= 4:
-        raise ValueError(
-            "All hidden words have already been discovered."
-        )
 
-    discovered_words = list(
-        quest.discovered_words
-    )
-    discovered_words.append(normalized_word)
-
-    update_document_data(
-        QUESTS_COLLECTION,
-        quest.session_id,
-        {
-            "discovered_words": discovered_words,
-            "version": quest.version + 1,
-        },
-    )
-
-    quest.discovered_words = discovered_words
-    quest.version += 1
-
-    return quest
-
+# ============================================================
+# FINAL REVEAL
+# ============================================================
 
 def unlock_final_reveal(
     session: Session,
     quest: Quest,
 ) -> Quest:
     """
-    Unlock the final reveal only after all four quest levels have
-    been completed and all four hidden words have been collected.
+    Unlock the Final Reveal.
+
+    Requirements:
+    - All four levels completed.
+    - All four hidden words discovered.
+    - Current state must be LEVEL_4_COMPLETE.
     """
+
+    _validate_session(session)
+    _validate_quest(
+        session,
+        quest,
+    )
+
     required_levels = {
         1,
         2,
@@ -844,7 +1018,13 @@ def unlock_final_reveal(
             "All four quest levels must be completed first."
         )
 
-    if len(quest.discovered_words) < 4:
+    if quest.current_level != 4:
+        raise ValueError(
+            "The quest must be at level 4 before "
+            "the final reveal can be unlocked."
+        )
+
+    if len(quest.discovered_words) != 4:
         raise ValueError(
             "All four hidden words must be discovered first."
         )
@@ -854,7 +1034,11 @@ def unlock_final_reveal(
             "The final reveal is not currently available."
         )
 
+    if quest.final_reveal_unlocked:
+        return quest
+
     next_state = STATE_FINAL_REVEAL
+    next_version = quest.version + 1
 
     update_document_data(
         QUESTS_COLLECTION,
@@ -862,17 +1046,23 @@ def unlock_final_reveal(
         {
             "final_reveal_unlocked": True,
             "state": next_state,
-            "version": quest.version + 1,
+            "version": next_version,
         },
     )
 
     quest.final_reveal_unlocked = True
     quest.state = next_state
-    quest.version += 1
+    quest.version = next_version
 
     update_session_state(
         session,
         next_state,
+    )
+
+    log_info(
+        logger,
+        "final_reveal_unlocked",
+        session_id=session.session_id,
     )
 
     return quest
