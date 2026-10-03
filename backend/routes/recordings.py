@@ -42,10 +42,14 @@ from utils.responses import (
 )
 
 
+# ============================================================
+# BLUEPRINT
+# ============================================================
+
 recordings_bp = Blueprint(
     "recordings",
     __name__,
-    url_prefix="/api/recordings",
+    url_prefix="/api/v1/recordings",
 )
 
 
@@ -75,7 +79,9 @@ def _get_json_body() -> dict:
     return data
 
 
-def _require_session_id(data: dict) -> str:
+def _require_session_id(
+    data: dict,
+) -> str:
     """
     Extract the session ID from a request.
     """
@@ -133,6 +139,10 @@ def _get_session_from_request(
 def _require_recording_id(
     data: dict,
 ) -> str:
+    """
+    Extract the recording ID from a request.
+    """
+
     recording_id = data.get(
         "recording_id"
     )
@@ -226,6 +236,12 @@ def start_recording_route():
         return error_response(
             message=str(exc),
             status_code=400,
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
         )
 
     except Exception:
@@ -335,9 +351,12 @@ def upload_pending_route():
             "content_type"
         )
 
-        if content_type is not None and not isinstance(
-            content_type,
-            str,
+        if (
+            content_type is not None
+            and not isinstance(
+                content_type,
+                str,
+            )
         ):
             raise ValueError(
                 "content_type must be a string."
@@ -396,12 +415,14 @@ def upload_recording_route():
     """
 
     try:
-        if request.content_type is None:
+        content_type_header = request.content_type
+
+        if content_type_header is None:
             raise ValueError(
                 "Content-Type is required."
             )
 
-        if not request.content_type.startswith(
+        if not content_type_header.startswith(
             "multipart/form-data"
         ):
             raise ValueError(
@@ -416,18 +437,24 @@ def upload_recording_route():
             "recording_id"
         )
 
-        if not isinstance(
-            session_id,
-            str,
-        ) or not session_id.strip():
+        if (
+            not isinstance(
+                session_id,
+                str,
+            )
+            or not session_id.strip()
+        ):
             raise ValueError(
                 "session_id is required."
             )
 
-        if not isinstance(
-            recording_id,
-            str,
-        ) or not recording_id.strip():
+        if (
+            not isinstance(
+                recording_id,
+                str,
+            )
+            or not recording_id.strip()
+        ):
             raise ValueError(
                 "recording_id is required."
             )
@@ -477,10 +504,13 @@ def upload_recording_route():
                 duration_ms = int(
                     duration_raw
                 )
-            except (TypeError, ValueError):
+            except (
+                TypeError,
+                ValueError,
+            ) as exc:
                 raise ValueError(
                     "duration_ms must be an integer."
-                )
+                ) from exc
 
         file_size_bytes = None
 
@@ -492,10 +522,13 @@ def upload_recording_route():
                 file_size_bytes = int(
                     file_size_raw
                 )
-            except (TypeError, ValueError):
+            except (
+                TypeError,
+                ValueError,
+            ) as exc:
                 raise ValueError(
                     "file_size_bytes must be an integer."
-                )
+                ) from exc
 
         recording = upload_recording(
             session=session,
@@ -641,6 +674,12 @@ def fail_recording_route():
             status_code=400,
         )
 
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
     except Exception:
         return error_response(
             message="Unable to update recording status.",
@@ -663,14 +702,32 @@ def get_recording_route(
     """
 
     try:
+        if not isinstance(
+            recording_id,
+            str,
+        ):
+            raise ValueError(
+                "recording_id is required."
+            )
+
+        recording_id = recording_id.strip()
+
+        if not recording_id:
+            raise ValueError(
+                "recording_id is required."
+            )
+
         session_id = request.args.get(
             "session_id"
         )
 
-        if not isinstance(
-            session_id,
-            str,
-        ) or not session_id.strip():
+        if (
+            not isinstance(
+                session_id,
+                str,
+            )
+            or not session_id.strip()
+        ):
             raise ValueError(
                 "session_id is required."
             )
@@ -710,8 +767,14 @@ def get_recording_route(
             status_code=400,
         )
 
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
     except Exception:
         return error_response(
             message="Unable to retrieve recording.",
             status_code=500,
-    )
+        )
