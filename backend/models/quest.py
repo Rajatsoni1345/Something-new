@@ -153,25 +153,22 @@ class Quest:
         self.metadata = dict(self.metadata)
 
         if self.current_level > 0:
-            expected_completed = set(
-                range(1, self.current_level)
-            )
+    expected_completed = set(
+        range(1, self.current_level + 1)
+    )
 
-            if not expected_completed.issubset(
-                set(self.completed_levels)
-            ):
-                raise ValueError(
-                    "completed_levels is inconsistent with "
-                    "current_level."
-                )
+    if not expected_completed.issubset(
+        set(self.completed_levels)
+    ):
+        raise ValueError(
+            "completed_levels is inconsistent with current_level."
+        )
 
-        if self.final_reveal_unlocked and (
-            self.current_level < 5
-        ):
-            raise ValueError(
-                "Final reveal cannot be unlocked before "
-                "the final level."
-            )
+if self.final_reveal_unlocked and self.current_level < 4:
+    raise ValueError(
+        "Final reveal cannot be unlocked before all four quest levels are complete."
+    )
+        
 
     @staticmethod
     def _validate_levels(
