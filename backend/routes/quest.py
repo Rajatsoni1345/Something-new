@@ -41,6 +41,10 @@ from utils.responses import (
 )
 
 
+# ============================================================
+# BLUEPRINT
+# ============================================================
+
 quest_bp = Blueprint(
     "quest",
     __name__,
@@ -93,7 +97,7 @@ def get_quest_state_route():
             status_code=200,
         )
 
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
         )
@@ -160,7 +164,7 @@ def complete_level_route():
             status_code=200,
         )
 
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
         )
@@ -223,7 +227,7 @@ def collect_item_route():
             status_code=200,
         )
 
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
         )
@@ -288,7 +292,7 @@ def discover_word_route():
             status_code=200,
         )
 
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
         )
@@ -351,7 +355,7 @@ def unlock_final_reveal_route():
             status_code=200,
         )
 
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
         )
