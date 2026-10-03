@@ -3,9 +3,6 @@ Birthday Quest - Reaction Routes
 
 HTTP API endpoints for the final reaction recording.
 
-The reaction is a special recording stage that occurs after
-the final birthday video has completed.
-
 Architecture:
 
     Browser
@@ -22,10 +19,10 @@ Architecture:
 
 IMPORTANT:
 - Camera and microphone access remain browser-controlled.
-- No Cloudinary credentials are exposed here.
-- The reaction recording belongs to exactly one session.
+- Cloudinary credentials are never exposed.
+- A reaction recording belongs to exactly one session.
 - Recording lifecycle validation remains in recording_service.
-- Routes do not directly access Firebase or Cloudinary.
+- Routes never access Firebase or Cloudinary directly.
 """
 
 from __future__ import annotations
@@ -56,6 +53,7 @@ from services.session_service import get_session
 
 from utils.responses import (
     bad_request,
+    error_response,
     not_found,
     success_response,
 )
@@ -87,6 +85,13 @@ def _get_active_session(
 ):
     """
     Validate and retrieve an active session.
+
+    Returns:
+        Session object
+
+    Raises:
+        ValueError:
+            Invalid or inactive session ID.
     """
 
     validated_session_id = validate_session_id(
@@ -112,10 +117,10 @@ def _recording_response_data(
     recording,
 ) -> dict:
     """
-    Return only frontend-safe recording information.
+    Return frontend-safe recording information.
 
-    The permanent Cloudinary URL is exposed only after the
-    recording has been verified.
+    The permanent Cloudinary URL is exposed only after
+    successful backend verification.
     """
 
     data = {
@@ -142,19 +147,54 @@ def _recording_response_data(
     return data
 
 
-def _get_json_or_empty() -> dict:
+def _get_json_payload() -> dict:
     """
-    Safely read a JSON request body.
+    Require a JSON object for JSON endpoints.
     """
+
+    if not request.is_json:
+        raise ValueError(
+            "Request body must be JSON."
+        )
 
     payload = request.get_json(
         silent=True
     )
 
-    if payload is None:
-        return {}
+    if not isinstance(
+        payload,
+        dict,
+    ):
+        raise ValueError(
+            "Request body must be a JSON object."
+        )
 
     return payload
+
+
+def _get_reaction_recording(
+    session,
+    recording_id: str,
+):
+    """
+    Retrieve a recording and ensure it is specifically
+    a reaction recording.
+    """
+
+    recording = get_recording(
+        session=session,
+        recording_id=recording_id,
+    )
+
+    if recording is None:
+        return None
+
+    if recording.recording_type != REACTION_RECORDING_TYPE:
+        raise ValueError(
+            "The specified recording is not a reaction recording."
+        )
+
+    return recording
 
 
 # ============================================================
@@ -172,20 +212,20 @@ def start_reaction_route():
             "session_id": "..."
         }
 
-    The frontend should start MediaRecorder only after this
-    endpoint successfully returns a recording ID.
+    MediaRecorder should start only after this endpoint
+    successfully returns a recording ID.
     """
 
     try:
-        payload = _get_json_or_empty()
+        payload = _get_json_payload()
 
         session_id = payload.get(
             "session_id"
         )
 
         if session_id is None:
-            return bad_request(
-                message="session_id is required."
+            raise ValueError(
+                "session_id is required."
             )
 
         session = _get_active_session(
@@ -225,6 +265,18 @@ def start_reaction_route():
             message=str(exc)
         )
 
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to start reaction recording.",
+            status_code=500,
+        )
+
 
 # ============================================================
 # STOP REACTION
@@ -237,7 +289,7 @@ def stop_reaction_route():
     """
 
     try:
-        payload = _get_json_or_empty()
+        payload = _get_json_payload()
 
         validated = validate_stop_recording_request(
             payload
@@ -252,7 +304,7 @@ def stop_reaction_route():
                 message="Session not found."
             )
 
-        recording = get_recording(
+        recording = _get_reaction_recording(
             session=session,
             recording_id=validated[
                 "recording_id"
@@ -262,14 +314,6 @@ def stop_reaction_route():
         if recording is None:
             return not_found(
                 message="Reaction recording not found."
-            )
-
-        if recording.recording_type != REACTION_RECORDING_TYPE:
-            return bad_request(
-                message=(
-                    "The specified recording is not "
-                    "a reaction recording."
-                )
             )
 
         recording = mark_recording_stopping(
@@ -284,13 +328,24 @@ def stop_reaction_route():
                 "recording": _recording_response_data(
                     recording
                 )
-            },
-            status_code=200,
+            }
         )
 
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to stop reaction recording.",
+            status_code=500,
         )
 
 
@@ -301,12 +356,11 @@ def stop_reaction_route():
 @reactions_bp.post("/upload-pending")
 def mark_reaction_upload_pending_route():
     """
-    Move a stopped reaction recording into the upload-pending
-    state.
+    Move the reaction recording into the upload-pending state.
     """
 
     try:
-        payload = _get_json_or_empty()
+        payload = _get_json_payload()
 
         validated = validate_upload_recording_request(
             payload
@@ -321,7 +375,7 @@ def mark_reaction_upload_pending_route():
                 message="Session not found."
             )
 
-        recording = get_recording(
+        recording = _get_reaction_recording(
             session=session,
             recording_id=validated[
                 "recording_id"
@@ -331,14 +385,6 @@ def mark_reaction_upload_pending_route():
         if recording is None:
             return not_found(
                 message="Reaction recording not found."
-            )
-
-        if recording.recording_type != REACTION_RECORDING_TYPE:
-            return bad_request(
-                message=(
-                    "The specified recording is not "
-                    "a reaction recording."
-                )
             )
 
         recording = mark_recording_upload_pending(
@@ -362,13 +408,24 @@ def mark_reaction_upload_pending_route():
                 "recording": _recording_response_data(
                     recording
                 )
-            },
-            status_code=200,
+            }
         )
 
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to prepare reaction upload.",
+            status_code=500,
         )
 
 
@@ -379,7 +436,7 @@ def mark_reaction_upload_pending_route():
 @reactions_bp.post("/upload")
 def upload_reaction_route():
     """
-    Upload the final reaction video.
+    Upload the reaction video.
 
     Expected multipart/form-data:
 
@@ -392,6 +449,18 @@ def upload_reaction_route():
     """
 
     try:
+        if not request.content_type:
+            raise ValueError(
+                "Content-Type is required."
+            )
+
+        if not request.content_type.startswith(
+            "multipart/form-data"
+        ):
+            raise ValueError(
+                "Upload request must use multipart/form-data."
+            )
+
         session_id = request.form.get(
             "session_id"
         )
@@ -401,13 +470,13 @@ def upload_reaction_route():
         )
 
         if not session_id:
-            return bad_request(
-                message="session_id is required."
+            raise ValueError(
+                "session_id is required."
             )
 
         if not recording_id:
-            return bad_request(
-                message="recording_id is required."
+            raise ValueError(
+                "recording_id is required."
             )
 
         session = _get_active_session(
@@ -426,7 +495,7 @@ def upload_reaction_route():
             }
         )
 
-        recording = get_recording(
+        recording = _get_reaction_recording(
             session=session,
             recording_id=validated_id[
                 "recording_id"
@@ -436,14 +505,6 @@ def upload_reaction_route():
         if recording is None:
             return not_found(
                 message="Reaction recording not found."
-            )
-
-        if recording.recording_type != REACTION_RECORDING_TYPE:
-            return bad_request(
-                message=(
-                    "The specified recording is not "
-                    "a reaction recording."
-                )
             )
 
         duration_raw = request.form.get(
@@ -469,10 +530,8 @@ def upload_reaction_route():
                     duration_raw
                 )
             except (TypeError, ValueError):
-                return bad_request(
-                    message=(
-                        "duration_ms must be a valid integer."
-                    )
+                raise ValueError(
+                    "duration_ms must be a valid integer."
                 )
 
         file_size_bytes = None
@@ -486,10 +545,8 @@ def upload_reaction_route():
                     file_size_raw
                 )
             except (TypeError, ValueError):
-                return bad_request(
-                    message=(
-                        "file_size_bytes must be a valid integer."
-                    )
+                raise ValueError(
+                    "file_size_bytes must be a valid integer."
                 )
 
         video_file = request.files.get(
@@ -497,18 +554,13 @@ def upload_reaction_route():
         )
 
         if video_file is None:
-            return bad_request(
-                message=(
-                    "The reaction recording file is required."
-                )
+            raise ValueError(
+                "The reaction recording file is required."
             )
 
         if not video_file.filename:
-            return bad_request(
-                message=(
-                    "The reaction recording file "
-                    "has no filename."
-                )
+            raise ValueError(
+                "The reaction recording file has no filename."
             )
 
         recording = upload_recording(
@@ -527,13 +579,24 @@ def upload_reaction_route():
                 "recording": _recording_response_data(
                     recording
                 )
-            },
-            status_code=200,
+            }
         )
 
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to upload reaction recording.",
+            status_code=500,
         )
 
 
@@ -548,7 +611,7 @@ def verify_reaction_route():
     """
 
     try:
-        payload = _get_json_or_empty()
+        payload = _get_json_payload()
 
         validated = validate_recording_id_request(
             payload
@@ -563,7 +626,7 @@ def verify_reaction_route():
                 message="Session not found."
             )
 
-        recording = get_recording(
+        recording = _get_reaction_recording(
             session=session,
             recording_id=validated[
                 "recording_id"
@@ -573,14 +636,6 @@ def verify_reaction_route():
         if recording is None:
             return not_found(
                 message="Reaction recording not found."
-            )
-
-        if recording.recording_type != REACTION_RECORDING_TYPE:
-            return bad_request(
-                message=(
-                    "The specified recording is not "
-                    "a reaction recording."
-                )
             )
 
         recording = verify_recording(
@@ -595,13 +650,24 @@ def verify_reaction_route():
                 "recording": _recording_response_data(
                     recording
                 )
-            },
-            status_code=200,
+            }
         )
 
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to verify reaction recording.",
+            status_code=500,
         )
 
 
@@ -616,7 +682,7 @@ def reaction_status_route():
     """
 
     try:
-        payload = _get_json_or_empty()
+        payload = _get_json_payload()
 
         validated = validate_recording_id_request(
             payload
@@ -631,7 +697,7 @@ def reaction_status_route():
                 message="Session not found."
             )
 
-        recording = get_recording(
+        recording = _get_reaction_recording(
             session=session,
             recording_id=validated[
                 "recording_id"
@@ -643,26 +709,23 @@ def reaction_status_route():
                 message="Reaction recording not found."
             )
 
-        if recording.recording_type != REACTION_RECORDING_TYPE:
-            return bad_request(
-                message=(
-                    "The specified recording is not "
-                    "a reaction recording."
-                )
-            )
-
         return success_response(
             data={
                 "recording": _recording_response_data(
                     recording
                 )
-            },
-            status_code=200,
+            }
         )
 
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to retrieve reaction status.",
+            status_code=500,
         )
 
 
@@ -677,7 +740,7 @@ def reaction_failed_route():
     """
 
     try:
-        payload = _get_json_or_empty()
+        payload = _get_json_payload()
 
         validated = validate_failed_recording_request(
             payload
@@ -692,7 +755,7 @@ def reaction_failed_route():
                 message="Session not found."
             )
 
-        recording = get_recording(
+        recording = _get_reaction_recording(
             session=session,
             recording_id=validated[
                 "recording_id"
@@ -702,14 +765,6 @@ def reaction_failed_route():
         if recording is None:
             return not_found(
                 message="Reaction recording not found."
-            )
-
-        if recording.recording_type != REACTION_RECORDING_TYPE:
-            return bad_request(
-                message=(
-                    "The specified recording is not "
-                    "a reaction recording."
-                )
             )
 
         recording = mark_recording_failed(
@@ -725,11 +780,22 @@ def reaction_failed_route():
                 "recording": _recording_response_data(
                     recording
                 )
-            },
-            status_code=200,
+            }
         )
 
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
-                  )
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to update reaction recording.",
+            status_code=500,
+        )
