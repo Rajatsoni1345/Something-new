@@ -10,6 +10,8 @@ HTTP request
     -> schema validation
     -> service
     -> consistent API response
+
+Business rules remain inside the service layer.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from services.session_service import (
 
 from utils.responses import (
     bad_request,
+    error_response,
     not_found,
     success_response,
 )
@@ -47,6 +50,35 @@ sessions_bp = Blueprint(
 
 
 # ============================================================
+# INTERNAL HELPERS
+# ============================================================
+
+def _get_json_payload() -> dict:
+    """
+    Require a JSON object from the request body.
+    """
+
+    if not request.is_json:
+        raise ValueError(
+            "Request body must be JSON."
+        )
+
+    payload = request.get_json(
+        silent=True
+    )
+
+    if not isinstance(
+        payload,
+        dict,
+    ):
+        raise ValueError(
+            "Request body must be a JSON object."
+        )
+
+    return payload
+
+
+# ============================================================
 # CREATE SESSION
 # ============================================================
 
@@ -59,9 +91,7 @@ def create_session_route():
     """
 
     try:
-        payload = request.get_json(
-            silent=True
-        )
+        payload = _get_json_payload()
 
         validated = validate_create_session_request(
             payload
@@ -83,6 +113,18 @@ def create_session_route():
             message=str(exc)
         )
 
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to create session.",
+            status_code=500,
+        )
+
 
 # ============================================================
 # RECOVER SESSION
@@ -97,9 +139,7 @@ def recover_session_route():
     """
 
     try:
-        payload = request.get_json(
-            silent=True
-        )
+        payload = _get_json_payload()
 
         validated = validate_recover_session_request(
             payload
@@ -127,6 +167,18 @@ def recover_session_route():
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to recover session.",
+            status_code=500,
         )
 
 
@@ -168,4 +220,10 @@ def get_session_route(
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to retrieve session.",
+            status_code=500,
     )
