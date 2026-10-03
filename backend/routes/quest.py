@@ -10,6 +10,8 @@ HTTP request
     -> session lookup
     -> quest service
     -> consistent API response
+
+Business rules remain inside the service layer.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from services.session_service import get_session
 
 from utils.responses import (
     bad_request,
+    error_response,
     not_found,
     success_response,
 )
@@ -52,6 +55,66 @@ quest_bp = Blueprint(
 
 
 # ============================================================
+# INTERNAL HELPERS
+# ============================================================
+
+def _get_json_payload():
+    """
+    Require a JSON object from the request body.
+    """
+
+    if not request.is_json:
+        raise ValueError(
+            "Request body must be JSON."
+        )
+
+    payload = request.get_json(
+        silent=True
+    )
+
+    if not isinstance(
+        payload,
+        dict,
+    ):
+        raise ValueError(
+            "Request body must be a JSON object."
+        )
+
+    return payload
+
+
+def _get_active_session(
+    session_id: str,
+):
+    """
+    Load a session and ensure it is still active.
+
+    Returns:
+        Session object
+
+    Raises:
+        LookupError: session does not exist
+        ValueError: session is inactive
+    """
+
+    session = get_session(
+        session_id
+    )
+
+    if session is None:
+        raise LookupError(
+            "Session not found."
+        )
+
+    if not session.active:
+        raise ValueError(
+            "The session is inactive."
+        )
+
+    return session
+
+
+# ============================================================
 # GET QUEST STATE
 # ============================================================
 
@@ -64,27 +127,15 @@ def get_quest_state_route():
     """
 
     try:
-        payload = request.get_json(
-            silent=True
-        )
+        payload = _get_json_payload()
 
         validated = validate_get_quest_state_request(
             payload
         )
 
-        session = get_session(
+        session = _get_active_session(
             validated["session_id"]
         )
-
-        if session is None:
-            return not_found(
-                message="Session not found."
-            )
-
-        if not session.active:
-            return bad_request(
-                message="The session is inactive."
-            )
 
         quest = get_or_create_quest(
             session
@@ -97,9 +148,20 @@ def get_quest_state_route():
             status_code=200,
         )
 
+    except LookupError as exc:
+        return not_found(
+            message=str(exc)
+        )
+
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to retrieve quest state.",
+            status_code=500,
         )
 
 
@@ -119,27 +181,15 @@ def complete_level_route():
     """
 
     try:
-        payload = request.get_json(
-            silent=True
-        )
+        payload = _get_json_payload()
 
         validated = validate_complete_level_request(
             payload
         )
 
-        session = get_session(
+        session = _get_active_session(
             validated["session_id"]
         )
-
-        if session is None:
-            return not_found(
-                message="Session not found."
-            )
-
-        if not session.active:
-            return bad_request(
-                message="The session is inactive."
-            )
 
         quest = get_quest(
             session.session_id
@@ -164,9 +214,26 @@ def complete_level_route():
             status_code=200,
         )
 
+    except LookupError as exc:
+        return not_found(
+            message=str(exc)
+        )
+
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to complete quest level.",
+            status_code=500,
         )
 
 
@@ -183,27 +250,15 @@ def collect_item_route():
     """
 
     try:
-        payload = request.get_json(
-            silent=True
-        )
+        payload = _get_json_payload()
 
         validated = validate_collect_item_request(
             payload
         )
 
-        session = get_session(
+        session = _get_active_session(
             validated["session_id"]
         )
-
-        if session is None:
-            return not_found(
-                message="Session not found."
-            )
-
-        if not session.active:
-            return bad_request(
-                message="The session is inactive."
-            )
 
         quest = get_quest(
             session.session_id
@@ -227,9 +282,26 @@ def collect_item_route():
             status_code=200,
         )
 
+    except LookupError as exc:
+        return not_found(
+            message=str(exc)
+        )
+
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to collect quest item.",
+            status_code=500,
         )
 
 
@@ -248,27 +320,15 @@ def discover_word_route():
     """
 
     try:
-        payload = request.get_json(
-            silent=True
-        )
+        payload = _get_json_payload()
 
         validated = validate_discover_word_request(
             payload
         )
 
-        session = get_session(
+        session = _get_active_session(
             validated["session_id"]
         )
-
-        if session is None:
-            return not_found(
-                message="Session not found."
-            )
-
-        if not session.active:
-            return bad_request(
-                message="The session is inactive."
-            )
 
         quest = get_quest(
             session.session_id
@@ -292,9 +352,26 @@ def discover_word_route():
             status_code=200,
         )
 
+    except LookupError as exc:
+        return not_found(
+            message=str(exc)
+        )
+
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
+        )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to discover hidden word.",
+            status_code=500,
         )
 
 
@@ -312,27 +389,15 @@ def unlock_final_reveal_route():
     """
 
     try:
-        payload = request.get_json(
-            silent=True
-        )
+        payload = _get_json_payload()
 
         validated = validate_get_quest_state_request(
             payload
         )
 
-        session = get_session(
+        session = _get_active_session(
             validated["session_id"]
         )
-
-        if session is None:
-            return not_found(
-                message="Session not found."
-            )
-
-        if not session.active:
-            return bad_request(
-                message="The session is inactive."
-            )
 
         quest = get_quest(
             session.session_id
@@ -355,7 +420,24 @@ def unlock_final_reveal_route():
             status_code=200,
         )
 
+    except LookupError as exc:
+        return not_found(
+            message=str(exc)
+        )
+
     except (ValueError, TypeError) as exc:
         return bad_request(
             message=str(exc)
         )
+
+    except RuntimeError as exc:
+        return error_response(
+            message=str(exc),
+            status_code=409,
+        )
+
+    except Exception:
+        return error_response(
+            message="Unable to unlock final reveal.",
+            status_code=500,
+    )
