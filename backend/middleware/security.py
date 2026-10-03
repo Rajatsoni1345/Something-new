@@ -7,6 +7,10 @@ Responsibilities:
 - Validate the incoming Host header.
 - Reject requests for untrusted hosts.
 - Keep host validation centralized.
+- Fail closed when trusted-host configuration is invalid.
+
+Admin authentication/authorization does NOT belong here.
+It is handled separately by the admin route/service layer.
 """
 
 from __future__ import annotations
@@ -17,14 +21,28 @@ from utils.responses import error_response
 
 
 # ============================================================
-# HOST VALIDATION
+# HOST CONFIGURATION
 # ============================================================
 
 def _get_normalized_trusted_hosts(
     app: Flask,
 ) -> set[str]:
     """
-    Return the configured trusted hosts in normalized form.
+    Return configured trusted hosts in normalized form.
+
+    Trusted hosts must contain hostnames only.
+
+    Valid examples:
+        example.com
+        api.example.com
+        localhost
+        127.0.0.1
+        [::1]
+
+    Invalid examples:
+        https://example.com
+        example.com/path
+        example.com:5000
     """
 
     trusted_hosts = app.config.get(
@@ -47,7 +65,9 @@ def _get_normalized_trusted_hosts(
             trusted_host,
             str,
         ):
-            continue
+            raise RuntimeError(
+                "Every TRUSTED_HOSTS entry must be a string."
+            )
 
         normalized_host = (
             trusted_host
@@ -59,14 +79,7 @@ def _get_normalized_trusted_hosts(
             continue
 
         # ----------------------------------------------------
-        # Host entries must contain only a hostname.
-        #
-        # Do not silently accept:
-        #   https://example.com
-        #   example.com/path
-        #   example.com:5000
-        #
-        # The actual request host is normalized separately.
+        # Never silently normalize a URL into a hostname.
         # ----------------------------------------------------
 
         if "://" in normalized_host:
@@ -79,6 +92,30 @@ def _get_normalized_trusted_hosts(
                 "TRUSTED_HOSTS entries cannot contain '/'."
             )
 
+        # ----------------------------------------------------
+        # A trusted host must not contain a port.
+        # ----------------------------------------------------
+
+        if normalized_host.startswith("["):
+            closing_bracket = normalized_host.find("]")
+
+            if closing_bracket == -1:
+                raise RuntimeError(
+                    "Invalid IPv6 entry in TRUSTED_HOSTS."
+                )
+
+            if normalized_host[
+                closing_bracket + 1:
+            ]:
+                raise RuntimeError(
+                    "TRUSTED_HOSTS entries cannot contain ports."
+                )
+
+        elif ":" in normalized_host:
+            raise RuntimeError(
+                "TRUSTED_HOSTS entries cannot contain ports."
+            )
+
         normalized_hosts.add(
             normalized_host
         )
@@ -86,12 +123,16 @@ def _get_normalized_trusted_hosts(
     return normalized_hosts
 
 
+# ============================================================
+# REQUEST HOST NORMALIZATION
+# ============================================================
+
 def _get_request_hostname() -> str:
     """
-    Extract and normalize the hostname from the request.
+    Extract the hostname from the current request.
 
-    Flask/Werkzeug has already parsed the Host header for us.
-    The port is removed before comparison.
+    Flask/Werkzeug parses the Host header before this function
+    runs. The port is removed before exact comparison.
     """
 
     host = request.host
@@ -108,10 +149,11 @@ def _get_request_hostname() -> str:
         return ""
 
     # --------------------------------------------------------
-    # IPv6 Host header
+    # IPv6
     #
-    # Example:
-    # [::1]:5000
+    # Examples:
+    #   [::1]
+    #   [::1]:5000
     # --------------------------------------------------------
 
     if host.startswith("["):
@@ -120,18 +162,27 @@ def _get_request_hostname() -> str:
         if closing_bracket == -1:
             return ""
 
-        return host[
+        hostname = host[
             : closing_bracket + 1
         ]
 
+        return hostname
+
     # --------------------------------------------------------
-    # Normal hostname / IPv4
+    # Normal hostname / IPv4.
+    #
+    # Example:
+    #   example.com:5000
+    #       -> example.com
     # --------------------------------------------------------
 
-    return host.split(
-        ":",
-        1,
-    )[0]
+    if ":" in host:
+        return host.split(
+            ":",
+            1,
+        )[0]
+
+    return host
 
 
 # ============================================================
@@ -142,7 +193,11 @@ def register_security_middleware(
     app: Flask,
 ) -> None:
     """
-    Register request-level security middleware.
+    Register request-level host validation middleware.
+
+    The configuration is validated during application startup,
+    while every incoming request is checked against the
+    resulting exact host allowlist.
     """
 
     trusted_hosts = _get_normalized_trusted_hosts(
@@ -156,7 +211,7 @@ def register_security_middleware(
         """
 
         # ----------------------------------------------------
-        # If no trusted hosts are configured, fail closed.
+        # Fail closed if no trusted host is configured.
         # ----------------------------------------------------
 
         if not trusted_hosts:
@@ -182,7 +237,9 @@ def register_security_middleware(
             )
 
         # ----------------------------------------------------
-        # Exact host matching only.
+        # Exact matching only.
+        #
+        # No wildcard/subdomain guessing is performed.
         # ----------------------------------------------------
 
         if request_hostname not in trusted_hosts:
