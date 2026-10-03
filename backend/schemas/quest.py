@@ -2,6 +2,12 @@
 Birthday Quest - Quest Schemas
 
 Request validation for quest-related API endpoints.
+
+IMPORTANT:
+- Normal quest levels are strictly 1 through 4.
+- Level 5 is not accepted by the normal level-completion endpoint.
+- Final Reveal has its own dedicated endpoint.
+- External input is validated before reaching the service layer.
 """
 
 from __future__ import annotations
@@ -16,6 +22,18 @@ from schemas.common import (
     validate_session_id,
 )
 
+
+# ============================================================
+# QUEST CONSTANTS
+# ============================================================
+
+MIN_NORMAL_LEVEL = 1
+MAX_NORMAL_LEVEL = 4
+
+
+# ============================================================
+# ALLOWED REQUEST FIELDS
+# ============================================================
 
 GET_QUEST_STATE_FIELDS = frozenset(
     {
@@ -46,13 +64,20 @@ DISCOVER_WORD_FIELDS = frozenset(
 )
 
 
+# ============================================================
+# GET QUEST STATE
+# ============================================================
+
 def validate_get_quest_state_request(
     data: Any,
 ) -> dict[str, str]:
     """
-    Validate a request for retrieving quest state.
+    Validate a request that asks for the current quest state.
     """
-    payload = require_dict(data)
+
+    payload = require_dict(
+        data
+    )
 
     reject_unknown_fields(
         payload,
@@ -67,20 +92,29 @@ def validate_get_quest_state_request(
     return {
         "session_id": validate_session_id(
             payload["session_id"]
-        ),
+        )
     }
 
+
+# ============================================================
+# COMPLETE LEVEL
+# ============================================================
 
 def validate_complete_level_request(
     data: Any,
 ) -> dict[str, Any]:
     """
-    Validate a request attempting to complete a level.
+    Validate a normal quest-level completion request.
 
-    The answer is treated as user input only. The backend will
-    independently determine whether the answer is correct.
+    Only Levels 1 through 4 are accepted here.
+
+    Level 5 is intentionally excluded because the final reveal
+    has a separate server-side progression flow.
     """
-    payload = require_dict(data)
+
+    payload = require_dict(
+        data
+    )
 
     reject_unknown_fields(
         payload,
@@ -93,12 +127,17 @@ def validate_complete_level_request(
         "answer",
     }
 
-    missing_fields = required_fields - set(payload)
+    missing_fields = (
+        required_fields
+        - set(payload)
+    )
 
     if missing_fields:
         raise ValueError(
             "Missing required field(s): "
-            + ", ".join(sorted(missing_fields))
+            + ", ".join(
+                sorted(missing_fields)
+            )
             + "."
         )
 
@@ -109,8 +148,8 @@ def validate_complete_level_request(
     level = require_integer(
         payload["level"],
         "level",
-        minimum=1,
-        maximum=5,
+        minimum=MIN_NORMAL_LEVEL,
+        maximum=MAX_NORMAL_LEVEL,
     )
 
     answer = require_string(
@@ -127,16 +166,20 @@ def validate_complete_level_request(
     }
 
 
+# ============================================================
+# COLLECT ITEM
+# ============================================================
+
 def validate_collect_item_request(
     data: Any,
 ) -> dict[str, str]:
     """
-    Validate a request to collect a quest item.
-
-    The service layer will verify whether that item is actually
-    available at the current quest state.
+    Validate a magical collectible submission.
     """
-    payload = require_dict(data)
+
+    payload = require_dict(
+        data
+    )
 
     reject_unknown_fields(
         payload,
@@ -148,12 +191,17 @@ def validate_collect_item_request(
         "item_id",
     }
 
-    missing_fields = required_fields - set(payload)
+    missing_fields = (
+        required_fields
+        - set(payload)
+    )
 
     if missing_fields:
         raise ValueError(
             "Missing required field(s): "
-            + ", ".join(sorted(missing_fields))
+            + ", ".join(
+                sorted(missing_fields)
+            )
             + "."
         )
 
@@ -168,23 +216,34 @@ def validate_collect_item_request(
         max_length=128,
     )
 
+    if "/" in item_id or "\\" in item_id:
+        raise ValueError(
+            "item_id contains invalid characters."
+        )
+
     return {
         "session_id": session_id,
         "item_id": item_id,
     }
 
 
+# ============================================================
+# DISCOVER HIDDEN WORD
+# ============================================================
+
 def validate_discover_word_request(
     data: Any,
 ) -> dict[str, str]:
     """
-    Validate a request to register a discovered hidden word.
+    Validate a hidden-word discovery submission.
 
-    The backend will later verify that the word is actually
-    associated with the current level and that the required
-    progression has been completed.
+    The actual authoritative word is checked later by the
+    quest service.
     """
-    payload = require_dict(data)
+
+    payload = require_dict(
+        data
+    )
 
     reject_unknown_fields(
         payload,
@@ -196,12 +255,17 @@ def validate_discover_word_request(
         "word",
     }
 
-    missing_fields = required_fields - set(payload)
+    missing_fields = (
+        required_fields
+        - set(payload)
+    )
 
     if missing_fields:
         raise ValueError(
             "Missing required field(s): "
-            + ", ".join(sorted(missing_fields))
+            + ", ".join(
+                sorted(missing_fields)
+            )
             + "."
         )
 
