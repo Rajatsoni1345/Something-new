@@ -40,6 +40,7 @@ from routes.health import health_bp
 from routes.sessions import sessions_bp
 from routes.quest import quest_bp
 from routes.recordings import recordings_bp
+from routes.reactions import reactions_bp
 
 
 # ============================================================
@@ -52,8 +53,7 @@ def configure_logging(
     """
     Configure application-wide logging.
 
-    The log format deliberately includes enough information for
-    Render/server debugging without exposing secrets.
+    Secrets and credentials must never be written to logs.
     """
 
     log_level_name = (
@@ -98,37 +98,26 @@ def register_security_headers(
 
     @app.after_request
     def add_security_headers(response):
-        # Prevent MIME-type sniffing.
         response.headers.setdefault(
             "X-Content-Type-Options",
             "nosniff",
         )
 
-        # Prevent the application from being embedded in an
-        # iframe.
         response.headers.setdefault(
             "X-Frame-Options",
             "DENY",
         )
 
-        # Limit referrer information.
         response.headers.setdefault(
             "Referrer-Policy",
             "strict-origin-when-cross-origin",
         )
 
-        # Browser permission policy.
-        #
-        # Camera and microphone are required by the frontend
-        # recording engine. The actual browser permission prompt
-        # is still controlled by the browser and user.
         response.headers.setdefault(
             "Permissions-Policy",
             "camera=(self), microphone=(self)",
         )
 
-        # HSTS is only appropriate when the production application
-        # is served over HTTPS.
         if not app.debug:
             response.headers.setdefault(
                 "Strict-Transport-Security",
@@ -146,14 +135,15 @@ def register_blueprints(
     app: Flask,
 ) -> None:
     """
-    Register all API blueprints under the configured API prefix.
+    Register every currently implemented API blueprint.
 
-    Current API structure:
+    API structure:
 
         /api/v1/health
         /api/v1/sessions
         /api/v1/quest
         /api/v1/recordings
+        /api/v1/reactions
     """
 
     api_prefix = (
@@ -184,6 +174,11 @@ def register_blueprints(
         url_prefix=f"{api_prefix}/recordings",
     )
 
+    app.register_blueprint(
+        reactions_bp,
+        url_prefix=f"{api_prefix}/reactions",
+    )
+
 
 # ============================================================
 # APPLICATION FACTORY
@@ -192,10 +187,6 @@ def register_blueprints(
 def create_app() -> Flask:
     """
     Create and configure the Flask application.
-
-    This factory is intentionally side-effect controlled so
-    testing and production deployment can instantiate the app
-    predictably.
     """
 
     config_class = get_config()
@@ -204,12 +195,10 @@ def create_app() -> Flask:
         __name__
     )
 
-    # Load centralized configuration.
     app.config.from_object(
         config_class
     )
 
-    # Explicitly apply request-size protection.
     app.config["MAX_CONTENT_LENGTH"] = (
         config_class.MAX_CONTENT_LENGTH
     )
