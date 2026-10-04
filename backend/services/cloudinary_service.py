@@ -130,3 +130,68 @@ def upload_video(
         resource_type="video",
         public_id=public_id,
         folder=folder,
+        overwrite=False,
+        unique_filename=False,
+        invalidate=False,
+        use_filename=False,
+        type="upload",
+    )
+
+    return result
+
+
+# ------------------------------------------------------------
+# VERIFY ASSET
+# ------------------------------------------------------------
+
+def verify_video(public_id: str) -> dict[str, Any]:
+    """
+    Verify that a Cloudinary video asset exists.
+    """
+
+    _initialize_cloudinary()
+
+    if not isinstance(public_id, str):
+        raise TypeError("public_id must be a string.")
+
+    public_id = public_id.strip()
+
+    if not public_id:
+        raise ValueError("public_id cannot be empty.")
+
+    result = cloudinary.api.resource(
+        public_id,
+        resource_type="video",
+        type="upload",
+    )
+
+    return result
+
+
+# ------------------------------------------------------------
+# DELETE ASSET
+# ------------------------------------------------------------
+
+def delete_video(public_id: str) -> dict[str, Any]:
+    """
+    Delete a Cloudinary video asset.
+    """
+
+    _initialize_cloudinary()
+
+    if not isinstance(public_id, str):
+        raise TypeError("public_id must be a string.")
+
+    public_id = public_id.strip()
+
+    if not public_id:
+        raise ValueError("public_id cannot be empty.")
+
+    result = cloudinary.uploader.destroy(
+        public_id,
+        resource_type="video",
+        type="upload",
+        invalidate=True,
+    )
+
+    return result
