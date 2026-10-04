@@ -3,15 +3,8 @@ Birthday Quest - Quest Routes
 
 HTTP API endpoints for reading and progressing quest state.
 
-Routes remain intentionally thin:
-
-HTTP request
-    -> schema validation
-    -> session lookup
-    -> quest service
-    -> consistent API response
-
-Business rules remain inside the service layer.
+URL prefix is declared in app.py. This blueprint does NOT
+declare its own prefix.
 """
 
 from __future__ import annotations
@@ -44,72 +37,41 @@ from utils.responses import (
 )
 
 
-# ============================================================
-# BLUEPRINT
-# ============================================================
-
-quest_bp = Blueprint(
-    "quest",
-    __name__,
-)
+quest_bp = Blueprint("quest", __name__)
 
 
 # ============================================================
-# INTERNAL HELPERS
+# HELPERS
 # ============================================================
 
-def _get_json_payload():
-    """
-    Require a JSON object from the request body.
-    """
-
+def _get_json_payload() -> dict:
     if not request.is_json:
-        raise ValueError(
-            "Request body must be JSON."
-        )
+        raise ValueError("Request body must be JSON.")
 
-    payload = request.get_json(
-        silent=True
-    )
+    payload = request.get_json(silent=True)
 
-    if not isinstance(
-        payload,
-        dict,
-    ):
-        raise ValueError(
-            "Request body must be a JSON object."
-        )
+    if not isinstance(payload, dict):
+        raise ValueError("Request body must be a JSON object.")
 
     return payload
 
 
-def _get_active_session(
-    session_id: str,
-):
+def _get_active_session(session_id: str):
     """
     Load a session and ensure it is still active.
 
-    Returns:
-        Session object
-
     Raises:
-        LookupError: session does not exist
-        ValueError: session is inactive
+        LookupError: session not found
+        ValueError: session inactive
     """
 
-    session = get_session(
-        session_id
-    )
+    session = get_session(session_id)
 
     if session is None:
-        raise LookupError(
-            "Session not found."
-        )
+        raise LookupError("Session not found.")
 
     if not session.active:
-        raise ValueError(
-            "The session is inactive."
-        )
+        raise ValueError("The session is inactive.")
 
     return session
 
@@ -121,42 +83,28 @@ def _get_active_session(
 @quest_bp.post("/state")
 def get_quest_state_route():
     """
-    Return the current quest state for a session.
-
     POST /api/v1/quest/state
     """
 
     try:
         payload = _get_json_payload()
 
-        validated = validate_get_quest_state_request(
-            payload
-        )
+        validated = validate_get_quest_state_request(payload)
 
-        session = _get_active_session(
-            validated["session_id"]
-        )
+        session = _get_active_session(validated["session_id"])
 
-        quest = get_or_create_quest(
-            session
-        )
+        quest = get_or_create_quest(session)
 
         return success_response(
-            data={
-                "quest": quest.to_dict(),
-            },
+            data={"quest": quest.to_dict()},
             status_code=200,
         )
 
     except LookupError as exc:
-        return not_found(
-            message=str(exc)
-        )
+        return not_found(message=str(exc))
 
     except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
-        )
+        return bad_request(message=str(exc))
 
     except Exception:
         return error_response(
@@ -172,28 +120,17 @@ def get_quest_state_route():
 @quest_bp.post("/levels/complete")
 def complete_level_route():
     """
-    Complete one validated quest level.
-
-    The submitted answer is passed to the service layer,
-    where the authoritative server-side answer is checked.
-
     POST /api/v1/quest/levels/complete
     """
 
     try:
         payload = _get_json_payload()
 
-        validated = validate_complete_level_request(
-            payload
-        )
+        validated = validate_complete_level_request(payload)
 
-        session = _get_active_session(
-            validated["session_id"]
-        )
+        session = _get_active_session(validated["session_id"])
 
-        quest = get_quest(
-            session.session_id
-        )
+        quest = get_quest(session.session_id)
 
         if quest is None:
             return not_found(
@@ -208,27 +145,18 @@ def complete_level_route():
         )
 
         return success_response(
-            data={
-                "quest": quest.to_dict(),
-            },
+            data={"quest": quest.to_dict()},
             status_code=200,
         )
 
     except LookupError as exc:
-        return not_found(
-            message=str(exc)
-        )
+        return not_found(message=str(exc))
 
     except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
-        )
+        return bad_request(message=str(exc))
 
     except RuntimeError as exc:
-        return error_response(
-            message=str(exc),
-            status_code=409,
-        )
+        return error_response(message=str(exc), status_code=409)
 
     except Exception:
         return error_response(
@@ -244,25 +172,17 @@ def complete_level_route():
 @quest_bp.post("/items/collect")
 def collect_item_route():
     """
-    Collect one magical quest item.
-
     POST /api/v1/quest/items/collect
     """
 
     try:
         payload = _get_json_payload()
 
-        validated = validate_collect_item_request(
-            payload
-        )
+        validated = validate_collect_item_request(payload)
 
-        session = _get_active_session(
-            validated["session_id"]
-        )
+        session = _get_active_session(validated["session_id"])
 
-        quest = get_quest(
-            session.session_id
-        )
+        quest = get_quest(session.session_id)
 
         if quest is None:
             return not_found(
@@ -276,27 +196,18 @@ def collect_item_route():
         )
 
         return success_response(
-            data={
-                "quest": quest.to_dict(),
-            },
+            data={"quest": quest.to_dict()},
             status_code=200,
         )
 
     except LookupError as exc:
-        return not_found(
-            message=str(exc)
-        )
+        return not_found(message=str(exc))
 
     except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
-        )
+        return bad_request(message=str(exc))
 
     except RuntimeError as exc:
-        return error_response(
-            message=str(exc),
-            status_code=409,
-        )
+        return error_response(message=str(exc), status_code=409)
 
     except Exception:
         return error_response(
@@ -312,27 +223,17 @@ def collect_item_route():
 @quest_bp.post("/words/discover")
 def discover_word_route():
     """
-    Submit a discovered hidden word.
-
-    The actual word is validated by the quest service.
-
     POST /api/v1/quest/words/discover
     """
 
     try:
         payload = _get_json_payload()
 
-        validated = validate_discover_word_request(
-            payload
-        )
+        validated = validate_discover_word_request(payload)
 
-        session = _get_active_session(
-            validated["session_id"]
-        )
+        session = _get_active_session(validated["session_id"])
 
-        quest = get_quest(
-            session.session_id
-        )
+        quest = get_quest(session.session_id)
 
         if quest is None:
             return not_found(
@@ -346,27 +247,18 @@ def discover_word_route():
         )
 
         return success_response(
-            data={
-                "quest": quest.to_dict(),
-            },
+            data={"quest": quest.to_dict()},
             status_code=200,
         )
 
     except LookupError as exc:
-        return not_found(
-            message=str(exc)
-        )
+        return not_found(message=str(exc))
 
     except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
-        )
+        return bad_request(message=str(exc))
 
     except RuntimeError as exc:
-        return error_response(
-            message=str(exc),
-            status_code=409,
-        )
+        return error_response(message=str(exc), status_code=409)
 
     except Exception:
         return error_response(
@@ -382,62 +274,41 @@ def discover_word_route():
 @quest_bp.post("/final-reveal/unlock")
 def unlock_final_reveal_route():
     """
-    Unlock the final reveal after all required quest conditions
-    have been satisfied.
-
     POST /api/v1/quest/final-reveal/unlock
     """
 
     try:
         payload = _get_json_payload()
 
-        validated = validate_get_quest_state_request(
-            payload
-        )
+        validated = validate_get_quest_state_request(payload)
 
-        session = _get_active_session(
-            validated["session_id"]
-        )
+        session = _get_active_session(validated["session_id"])
 
-        quest = get_quest(
-            session.session_id
-        )
+        quest = get_quest(session.session_id)
 
         if quest is None:
             return not_found(
                 message="Quest not found for this session."
             )
 
-        quest = unlock_final_reveal(
-            session=session,
-            quest=quest,
-        )
+        quest = unlock_final_reveal(session=session, quest=quest)
 
         return success_response(
-            data={
-                "quest": quest.to_dict(),
-            },
+            data={"quest": quest.to_dict()},
             status_code=200,
         )
 
     except LookupError as exc:
-        return not_found(
-            message=str(exc)
-        )
+        return not_found(message=str(exc))
 
     except (ValueError, TypeError) as exc:
-        return bad_request(
-            message=str(exc)
-        )
+        return bad_request(message=str(exc))
 
     except RuntimeError as exc:
-        return error_response(
-            message=str(exc),
-            status_code=409,
-        )
+        return error_response(message=str(exc), status_code=409)
 
     except Exception:
         return error_response(
             message="Unable to unlock final reveal.",
             status_code=500,
-    )
+)
