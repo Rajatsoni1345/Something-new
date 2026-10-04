@@ -3,6 +3,9 @@ Birthday Quest - Health Check Routes
 
 Provides lightweight endpoints for checking whether the
 backend is running correctly.
+
+URL prefix is declared centrally in app.py. Blueprints never
+declare their own prefix.
 """
 
 from __future__ import annotations
@@ -12,29 +15,16 @@ from datetime import datetime, timezone
 from flask import Blueprint, current_app, jsonify
 
 
-# ------------------------------------------------------------
-# BLUEPRINT
-# ------------------------------------------------------------
+health_bp = Blueprint("health", __name__)
 
-health_bp = Blueprint(
-    "health",
-    __name__,
-    url_prefix="/health",
-)
-
-
-# ------------------------------------------------------------
-# HEALTH CHECK
-# ------------------------------------------------------------
 
 @health_bp.get("")
 def health_check():
     """
     Basic backend health check.
 
-    This endpoint intentionally does not contact Firebase,
-    Cloudinary, or any external service. It only confirms that
-    the Flask application process is alive.
+    Intentionally does not contact Firebase, Cloudinary, or any
+    external service. Only confirms the Flask process is alive.
     """
 
     return jsonify(
@@ -50,9 +40,7 @@ def health_check():
                     "FLASK_ENV",
                     "unknown",
                 ),
-                "timestamp": datetime.now(
-                    timezone.utc
-                ).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         }
     ), 200
