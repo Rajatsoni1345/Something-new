@@ -1041,4 +1041,29 @@ def get_recording(
 def is_video_1(recording: Recording) -> bool:
     return (
         isinstance(recording, Recording)
-        and recording.recording_type == REC
+        and recording.recording_type == RECORDING_TYPE_VIDEO_1
+    )
+
+
+def is_video_2(recording: Recording) -> bool:
+    return (
+        isinstance(recording, Recording)
+        and recording.recording_type == RECORDING_TYPE_VIDEO_2
+    )
+
+
+def is_reaction(recording: Recording) -> bool:
+    return (
+        isinstance(recording, Recording)
+        and recording.recording_type == RECORDING_TYPE_REACTION
+    )
+
+
+def is_verified(recording: Recording) -> bool:
+    return (
+        isinstance(recording, Recording)
+        and recording.status == RECORDING_STATUS_VERIFIED
+        and bool(recording.cloudinary_public_id)
+        and bool(recording.secure_url)
+        and recording.resource_type == "video"
+    )
