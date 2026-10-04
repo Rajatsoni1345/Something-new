@@ -1,37 +1,38 @@
+"""
+Birthday Quest - Validation Service
+
+Shared validation helpers used by service layer functions.
+
+Constants (recording types, collectibles, levels) come from
+constants.py to guarantee a single source of truth.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Mapping, Optional
+
+from constants import (
+    ALLOWED_COLLECTIBLE_ITEMS,
+    ALLOWED_RECORDING_TYPES,
+    MAX_ANSWER_LENGTH,
+    MAX_GENERIC_STRING_LENGTH,
+    MAX_WORD_LENGTH,
+    MAX_NORMAL_QUEST_LEVEL,
+    MIN_NORMAL_QUEST_LEVEL,
+)
 
 
 class ValidationError(ValueError):
     """Raised when incoming data fails application validation."""
 
 
-MIN_LEVEL = 1
-MAX_LEVEL = 4
-
-ALLOWED_RECORDING_TYPES = {
-    "video_1",
-    "video_2",
-    "reaction",
-    "final",
-}
-
-ALLOWED_COLLECTIBLE_ITEMS = {
-    "owl",
-    "wand",
-    "broom",
-}
-
-MAX_TEXT_LENGTH = 500
-MAX_WORD_LENGTH = 100
-MAX_CODE_LENGTH = 100
-
+# ============================================================
+# INTERNAL HELPERS
+# ============================================================
 
 def _require_mapping(data: Any, field_name: str = "data") -> Mapping[str, Any]:
     if not isinstance(data, Mapping):
         raise ValidationError(f"{field_name} must be an object.")
-
     return data
 
 
@@ -39,7 +40,7 @@ def _require_non_empty_string(
     value: Any,
     field_name: str,
     *,
-    max_length: int = MAX_TEXT_LENGTH,
+    max_length: int = MAX_GENERIC_STRING_LENGTH,
 ) -> str:
     if not isinstance(value, str):
         raise ValidationError(f"{field_name} must be a string.")
@@ -57,6 +58,10 @@ def _require_non_empty_string(
     return normalized
 
 
+# ============================================================
+# PRIMITIVE VALIDATORS
+# ============================================================
+
 def validate_session_id(session_id: Any) -> str:
     return _require_non_empty_string(
         session_id,
@@ -69,9 +74,10 @@ def validate_level(level: Any) -> int:
     if isinstance(level, bool) or not isinstance(level, int):
         raise ValidationError("level must be an integer.")
 
-    if level < MIN_LEVEL or level > MAX_LEVEL:
+    if level < MIN_NORMAL_QUEST_LEVEL or level > MAX_NORMAL_QUEST_LEVEL:
         raise ValidationError(
-            f"level must be between {MIN_LEVEL} and {MAX_LEVEL}."
+            f"level must be between {MIN_NORMAL_QUEST_LEVEL} "
+            f"and {MAX_NORMAL_QUEST_LEVEL}."
         )
 
     return level
@@ -115,7 +121,7 @@ def validate_code(code: Any) -> str:
     return _require_non_empty_string(
         code,
         "code",
-        max_length=MAX_CODE_LENGTH,
+        max_length=128,
     )
 
 
@@ -123,7 +129,7 @@ def validate_answer(answer: Any) -> str:
     return _require_non_empty_string(
         answer,
         "answer",
-        max_length=MAX_CODE_LENGTH,
+        max_length=MAX_ANSWER_LENGTH,
     )
 
 
@@ -150,109 +156,78 @@ def validate_quest_transition(
     next_state: Any,
 ) -> tuple[str, str]:
     current = _require_non_empty_string(
-        current_state,
-        "current_state",
-        max_length=64,
+        current_state, "current_state", max_length=64
     )
-
     next_value = _require_non_empty_string(
-        next_state,
-        "next_state",
-        max_length=64,
+        next_state, "next_state", max_length=64
     )
 
     if current == next_value:
-        raise ValidationError("Current state and next state must be different.")
+        raise ValidationError(
+            "Current state and next state must be different."
+        )
 
     return current, next_value
 
 
+# ============================================================
+# PAYLOAD VALIDATORS
+# ============================================================
+
 def validate_level_payload(data: Any) -> dict[str, Any]:
     payload = _require_mapping(data)
-
     level = validate_level(payload.get("level"))
     answer = validate_answer(payload.get("answer"))
-
-    return {
-        "level": level,
-        "answer": answer,
-    }
+    return {"level": level, "answer": answer}
 
 
 def validate_collectible_payload(data: Any) -> dict[str, Any]:
     payload = _require_mapping(data)
-
     item = validate_collectible_item(payload.get("item"))
-
-    return {
-        "item": item,
-    }
+    return {"item": item}
 
 
 def validate_word_payload(data: Any) -> dict[str, Any]:
     payload = _require_mapping(data)
-
     word = validate_hidden_word(payload.get("word"))
-
-    return {
-        "word": word,
-    }
+    return {"word": word}
 
 
 def validate_ticket_payload(data: Any) -> dict[str, Any]:
     payload = _require_mapping(data)
-
     ticket_code = validate_code(payload.get("ticket_code"))
-
-    return {
-        "ticket_code": ticket_code,
-    }
+    return {"ticket_code": ticket_code}
 
 
 def validate_sorting_payload(data: Any) -> dict[str, Any]:
     payload = _require_mapping(data)
-
     house = _require_non_empty_string(
-        payload.get("house"),
-        "house",
-        max_length=64,
+        payload.get("house"), "house", max_length=64
     )
-
-    return {
-        "house": house,
-    }
+    return {"house": house}
 
 
 def validate_recording_payload(data: Any) -> dict[str, Any]:
     payload = _require_mapping(data)
-
-    recording_type = validate_recording_type(
-        payload.get("recording_type")
-    )
-
-    return {
-        "recording_type": recording_type,
-    }
+    recording_type = validate_recording_type(payload.get("recording_type"))
+    return {"recording_type": recording_type}
 
 
 def validate_optional_string(
     value: Any,
     field_name: str,
     *,
-    max_length: int = MAX_TEXT_LENGTH,
+    max_length: int = MAX_GENERIC_STRING_LENGTH,
 ) -> Optional[str]:
     if value is None:
         return None
 
     return _require_non_empty_string(
-        value,
-        field_name,
-        max_length=max_length,
+        value, field_name, max_length=max_length
     )
 
 
 def validate_boolean(value: Any, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise ValidationError(f"{field_name} must be a boolean.")
-
     return value
