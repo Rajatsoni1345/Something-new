@@ -19,6 +19,16 @@ import cloudinary.api
 import cloudinary.uploader
 
 from config import get_config
+from constants import CLOUDINARY_FOLDER
+
+
+# Re-exported for test introspection and service composition.
+__all__ = [
+    "CLOUDINARY_FOLDER",
+    "upload_video",
+    "verify_video",
+    "delete_video",
+]
 
 
 # ------------------------------------------------------------
@@ -56,9 +66,7 @@ def _initialize_cloudinary() -> None:
         }
 
         missing = [
-            name
-            for name, value in required_values.items()
-            if not value
+            name for name, value in required_values.items() if not value
         ]
 
         if missing:
@@ -84,148 +92,41 @@ def _initialize_cloudinary() -> None:
 def upload_video(
     file_object: Any,
     public_id: str,
-    folder: str = "birthday-quest/recordings",
+    folder: str = CLOUDINARY_FOLDER,
 ) -> dict[str, Any]:
     """
     Upload a video to Cloudinary.
 
     The backend receives the file and sends it directly to
     Cloudinary without permanently storing it on Render.
-
-    Args:
-        file_object:
-            File-like object containing the recording.
-
-        public_id:
-            Stable identifier for the Cloudinary asset.
-
-        folder:
-            Cloudinary folder used for organization.
-
-    Returns:
-        Cloudinary upload response dictionary.
     """
 
     _initialize_cloudinary()
 
     if file_object is None:
-        raise ValueError(
-            "file_object cannot be None."
-        )
+        raise ValueError("file_object cannot be None.")
 
     if not isinstance(public_id, str):
-        raise TypeError(
-            "public_id must be a string."
-        )
+        raise TypeError("public_id must be a string.")
 
     public_id = public_id.strip()
 
     if not public_id:
-        raise ValueError(
-            "public_id cannot be empty."
-        )
+        raise ValueError("public_id cannot be empty.")
 
     if "/" in public_id:
-        raise ValueError(
-            "public_id must not contain '/'."
-        )
+        raise ValueError("public_id must not contain '/'.")
 
     if not isinstance(folder, str):
-        raise TypeError(
-            "folder must be a string."
-        )
+        raise TypeError("folder must be a string.")
 
     folder = folder.strip().strip("/")
 
     if not folder:
-        raise ValueError(
-            "folder cannot be empty."
-        )
+        raise ValueError("folder cannot be empty.")
 
     result = cloudinary.uploader.upload(
         file_object,
         resource_type="video",
         public_id=public_id,
         folder=folder,
-        overwrite=False,
-        unique_filename=False,
-        invalidate=False,
-        use_filename=False,
-        type="upload",
-    )
-
-    return result
-
-
-# ------------------------------------------------------------
-# VERIFY ASSET
-# ------------------------------------------------------------
-
-def verify_video(
-    public_id: str,
-) -> dict[str, Any]:
-    """
-    Verify that a Cloudinary video asset exists.
-
-    Returns Cloudinary resource metadata.
-    """
-
-    _initialize_cloudinary()
-
-    if not isinstance(public_id, str):
-        raise TypeError(
-            "public_id must be a string."
-        )
-
-    public_id = public_id.strip()
-
-    if not public_id:
-        raise ValueError(
-            "public_id cannot be empty."
-        )
-
-    result = cloudinary.api.resource(
-        public_id,
-        resource_type="video",
-        type="upload",
-    )
-
-    return result
-
-
-# ------------------------------------------------------------
-# DELETE ASSET
-# ------------------------------------------------------------
-
-def delete_video(
-    public_id: str,
-) -> dict[str, Any]:
-    """
-    Delete a Cloudinary video asset.
-
-    This operation will only be called by authorized backend
-    workflows.
-    """
-
-    _initialize_cloudinary()
-
-    if not isinstance(public_id, str):
-        raise TypeError(
-            "public_id must be a string."
-        )
-
-    public_id = public_id.strip()
-
-    if not public_id:
-        raise ValueError(
-            "public_id cannot be empty."
-        )
-
-    result = cloudinary.uploader.destroy(
-        public_id,
-        resource_type="video",
-        type="upload",
-        invalidate=True,
-    )
-
-    return result
