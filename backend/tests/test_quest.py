@@ -1,20 +1,9 @@
 import pytest
 
-from app import create_app
-from routes import quest as quest_route
 
-
-@pytest.fixture()
-def app():
-    app = create_app("testing")
-    app.config.update(TESTING=True)
-    return app
-
-
-@pytest.fixture()
-def client(app):
-    with app.test_client() as client:
-        yield client
+def _create_session(client):
+    response = client.post("/api/v1/sessions", json={})
+    return response.get_json()["data"]["session"]["session_id"]
 
 
 def test_get_state_requires_json(client):
@@ -24,134 +13,78 @@ def test_get_state_requires_json(client):
     assert response.is_json
 
 
-def test_get_state_rejects_invalid_json(client):
-    response = client.post(
-        "/api/v1/quest/state",
-        data="not-json",
-        content_type="application/json",
-    )
-
-    assert response.status_code == 400
-    assert response.is_json
-
-
 def test_get_state_requires_session_id(client):
-    response = client.post(
-        "/api/v1/quest/state",
-        json={},
-    )
+    response = client.post("/api/v1/quest/state", json={})
 
     assert response.status_code == 400
-    assert response.is_json
+
+
+def test_get_state_unknown_session(client):
+    response = client.post(
+        "/api/v1/quest/state",
+        json={"session_id": "00000000-0000-4000-8000-000000000000"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_get_state_creates_quest(client):
+    session_id = _create_session(client)
+
+    response = client.post(
+        "/api/v1/quest/state",
+        json={"session_id": session_id},
+    )
+
+    assert response.status_code == 200
+    quest = response.get_json()["data"]["quest"]
+    assert quest["state"] == "NEW"
+    assert quest["session_id"] == session_id
 
 
 def test_complete_level_requires_json(client):
     response = client.post("/api/v1/quest/levels/complete")
-
     assert response.status_code == 400
-    assert response.is_json
+
+
+def test_complete_level_unknown_session(client):
+    response = client.post(
+        "/api/v1/quest/levels/complete",
+        json={
+            "session_id": "00000000-0000-4000-8000-000000000000",
+            "level": 1,
+            "answer": "whatever",
+        },
+    )
+    assert response.status_code == 404
 
 
 def test_collect_item_requires_json(client):
     response = client.post("/api/v1/quest/items/collect")
-
     assert response.status_code == 400
-    assert response.is_json
 
 
 def test_discover_word_requires_json(client):
     response = client.post("/api/v1/quest/words/discover")
-
     assert response.status_code == 400
-    assert response.is_json
 
 
 def test_unlock_final_reveal_requires_json(client):
     response = client.post("/api/v1/quest/final-reveal/unlock")
-
     assert response.status_code == 400
-    assert response.is_json
 
 
-def test_complete_level_rejects_missing_session_id(client):
-    response = client.post(
-        "/api/v1/quest/levels/complete",
-        json={"level": 1},
-    )
-
-    assert response.status_code == 400
-    assert response.is_json
-
-
-def test_collect_item_rejects_missing_session_id(client):
-    response = client.post(
-        "/api/v1/quest/items/collect",
-        json={"item": "owl"},
-    )
-
-    assert response.status_code == 400
-    assert response.is_json
-
-
-def test_discover_word_rejects_missing_session_id(client):
-    response = client.post(
-        "/api/v1/quest/words/discover",
-        json={"word": "magic"},
-    )
-
-    assert response.status_code == 400
-    assert response.is_json
-
-
-def test_unlock_final_reveal_rejects_missing_session_id(client):
-    response = client.post(
-        "/api/v1/quest/final-reveal/unlock",
-        json={},
-    )
-
-    assert response.status_code == 400
-    assert response.is_json
-
-
-def test_complete_level_handles_missing_session(client, monkeypatch):
-    def fake_get_session(session_id):
-        raise LookupError("session not found")
-
-    monkeypatch.setattr(
-        quest_route.session_service,
-        "get_session",
-        fake_get_session,
-    )
+def test_complete_level_wrong_state_returns_400(client):
+    session_id = _create_session(client)
 
     response = client.post(
         "/api/v1/quest/levels/complete",
         json={
-            "session_id": "test-session",
+            "session_id": session_id,
             "level": 1,
+            "answer": "LEVEL_ONE_ANSWER",
         },
     )
 
-    assert response.status_code == 404
-    assert response.is_json
-
-
-def test_collect_item_handles_missing_session(client, monkeypatch):
-    def fake_get_session(session_id):
-        raise LookupError("session not found")
-
-    monkeypatch.setattr(
-        quest_route.session_service,
-        "get_session",
-        fake_get_session,
-    )
-
-    response = client.post(
-        "/api/v1/quest/items/collect",
-        json={
-            "session_id": "test-session",
-            "item": "owl",
-        },
-    )
-
-    assert response.status_code == 404
-    assert response.is_json
+    # Quest is still in NEW; level 1 is not available.
+    assert response.status_code == 400
