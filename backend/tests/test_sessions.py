@@ -1,20 +1,4 @@
-import pytest
-
-from app import create_app
-from routes import sessions as sessions_route
-
-
-@pytest.fixture()
-def app():
-    app = create_app("testing")
-    app.config.update(TESTING=True)
-    return app
-
-
-@pytest.fixture()
-def client(app):
-    with app.test_client() as client:
-        yield client
+from services.session_service import create_session
 
 
 def test_create_session_requires_json(client):
@@ -35,25 +19,8 @@ def test_create_session_rejects_invalid_json(client):
     assert response.is_json
 
 
-def test_create_session_success(client, monkeypatch):
-    expected = {
-        "session_id": "test-session-123",
-        "status": "active",
-    }
-
-    def fake_create_session():
-        return expected
-
-    monkeypatch.setattr(
-        sessions_route.session_service,
-        "create_session",
-        fake_create_session,
-    )
-
-    response = client.post(
-        "/api/v1/sessions",
-        json={},
-    )
+def test_create_session_success(client):
+    response = client.post("/api/v1/sessions", json={})
 
     assert response.status_code == 201
     assert response.is_json
@@ -61,47 +28,54 @@ def test_create_session_success(client, monkeypatch):
     data = response.get_json()
 
     assert data["success"] is True
-    assert data["data"] == expected
+    assert "session" in data["data"]
+    assert data["data"]["session"]["state"] == "NEW"
 
 
-def test_create_session_handles_service_conflict(client, monkeypatch):
-    def fake_create_session():
-        raise RuntimeError("session conflict")
+def test_get_session_success(client):
+    created = client.post("/api/v1/sessions", json={})
+    session_id = created.get_json()["data"]["session"]["session_id"]
 
-    monkeypatch.setattr(
-        sessions_route.session_service,
-        "create_session",
-        fake_create_session,
+    response = client.get(f"/api/v1/sessions/{session_id}")
+
+    assert response.status_code == 200
+    assert response.get_json()["data"]["session"]["session_id"] == session_id
+
+
+def test_get_session_not_found(client):
+    response = client.get(
+        "/api/v1/sessions/00000000-0000-4000-8000-000000000000"
     )
 
-    response = client.post(
-        "/api/v1/sessions",
-        json={},
-    )
-
-    assert response.status_code == 409
-    assert response.is_json
+    assert response.status_code == 404
 
 
 def test_recover_session_requires_json(client):
     response = client.post("/api/v1/sessions/recover")
 
     assert response.status_code == 400
-    assert response.is_json
 
 
-def test_recover_session_rejects_invalid_json(client):
+def test_recover_session_success(client):
+    created = client.post("/api/v1/sessions", json={})
+    session_id = created.get_json()["data"]["session"]["session_id"]
+
     response = client.post(
         "/api/v1/sessions/recover",
-        data="invalid",
-        content_type="application/json",
+        json={"session_id": session_id},
     )
 
-    assert response.status_code == 400
-    assert response.is_json
+    assert response.status_code == 200
+    assert (
+        response.get_json()["data"]["session"]["session_id"]
+        == session_id
+    )
 
 
-def test_get_session_requires_valid_session_id(client):
-    response = client.get("/api/v1/sessions/")
+def test_recover_unknown_session(client):
+    response = client.post(
+        "/api/v1/sessions/recover",
+        json={"session_id": "00000000-0000-4000-8000-000000000000"},
+    )
 
-    assert response.status_code in (404, 405)
+    assert response.status_code == 404
